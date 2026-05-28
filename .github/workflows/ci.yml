@@ -96,26 +96,3 @@ jobs:
             ghcr.io/jzacharie/graphon:${{ github.sha }}-amd64 \
             ghcr.io/jzacharie/graphon:${{ github.sha }}-arm64
 
-  deploy:
-    name: Deploy
-    needs: [merge-manifest]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - name: Checkout GitOps repo (jo3)
-        uses: actions/checkout@v4
-        with:
-          repository: JZacharie/jo3
-          token: ${{ secrets.GH_PAT }}
-          path: jo3
-
-      - name: Update production image tags
-        run: |
-          SHA="${{ github.sha }}"
-          sed -i "s|tag: \"latest\"|tag: \"$SHA\"|" jo3/values/ai/graphon/values.yaml
-          cd jo3
-          git add values/ai/graphon/values.yaml
-          git -c user.name="Graphon CI" -c user.email="ci@graphon.org" commit -m "chore(ai/graphon): deploy production ${{ github.sha }}"
-          git push
