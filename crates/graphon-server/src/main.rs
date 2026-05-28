@@ -99,6 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("PYLOS_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".into());
     let pylos_api_key = std::env::var("PYLOS_API_KEY").ok();
     let pylos_model = std::env::var("PYLOS_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".into());
+    let pylos_embedding_model = std::env::var("PYLOS_EMBEDDING_MODEL").ok();
     let qdrant_url = std::env::var("QDRANT_URL").ok();
     let qdrant_collection = std::env::var("QDRANT_COLLECTION").ok();
     let qdrant_vector_size = std::env::var("QDRANT_VECTOR_SIZE")
@@ -109,8 +110,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gmail_client_adapter = Arc::new(GmailClient::new(gmail_token));
     let gmail_client = gmail_client_adapter.clone() as Arc<dyn GmailPort>;
     let classifier = Arc::new(ClassifierAdapter::new(
-        pylos_base_url,
-        pylos_api_key,
+        pylos_base_url.clone(),
+        pylos_api_key.clone(),
         pylos_model,
     ));
     let storage = Arc::new(DatabaseAdapter::new(database_url.as_deref()).await?);
@@ -119,6 +120,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         qdrant_collection,
         qdrant_vector_size,
         llm_key,
+        Some(pylos_base_url),
+        pylos_api_key,
+        pylos_embedding_model,
     ));
     let vector_store = qdrant_adapter.clone() as Arc<dyn VectorStorePort>;
     let rag_indexer = Arc::new(RagIndexer::new(storage.clone(), vector_store));

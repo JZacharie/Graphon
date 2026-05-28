@@ -11,6 +11,9 @@ pub struct QdrantAdapter {
     collection_name: String,
     vector_size: usize,
     llm_api_key: Option<String>,
+    pylos_base_url: Option<String>,
+    pylos_api_key: Option<String>,
+    pylos_embedding_model: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -44,6 +47,23 @@ struct Embedding {
     values: Vec<f32>,
 }
 
+#[derive(Serialize)]
+struct PylosEmbedRequest {
+    model: String,
+    input: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct PylosEmbedResponse {
+    data: Vec<PylosEmbeddingData>,
+}
+
+#[derive(Deserialize)]
+struct PylosEmbeddingData {
+    index: usize,
+    embedding: Vec<f32>,
+}
+
 #[derive(Deserialize)]
 struct QdrantSearchResponse {
     result: Vec<QdrantScoredPoint>,
@@ -65,6 +85,9 @@ impl QdrantAdapter {
         collection_name: Option<String>,
         vector_size: Option<usize>,
         llm_api_key: Option<String>,
+        pylos_base_url: Option<String>,
+        pylos_api_key: Option<String>,
+        pylos_embedding_model: Option<String>,
     ) -> Self {
         let qdrant_url =
             qdrant_url.unwrap_or_else(|| "http://qdrant.qdrant.svc.cluster.local:6333".to_string());
@@ -81,6 +104,9 @@ impl QdrantAdapter {
             collection_name,
             vector_size,
             llm_api_key,
+            pylos_base_url,
+            pylos_api_key,
+            pylos_embedding_model,
         }
     }
 
@@ -100,84 +126,135 @@ impl QdrantAdapter {
     }
 
     async fn get_embeddings(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, GraphonError> {
-        let api_key = match &self.llm_api_key {
-            Some(key) => key,
-            None => {
-                return Err(GraphonError::Classifier(
-                    "LLM_API_KEY not configured. Cannot generate embeddings.".to_string(),
-                ))
+        if let Some(ref model) = self.pylos_embedding_model {
+            let base_url = self.pylos_base_url.as_deref().unwrap_or("http://localhost:3000");
+            let url = format!("{}/v1/embeddings", base_url.trim_end_matches('/'));
+            let body = PylosEmbedRequest {
+                model: model.clone(),
+                input: texts.to_vec(),
+            };
+            let mut req = self.client.post(&url).json(&body);
+            if let Some(ref key) = self.pylos_api_key {
+                req = req.header("Authorization", format!("Bearer {}", key));
             }
-        };
+            let response = req.send().await?;
+            if !response.status().is_success() {
+                let err = response.text().await.unwrap_or_default();
+                return Err(GraphonError::Classifier(format!(
+                    "Pylos Embedding API error: {}",
+                    err
+                )));
+            }
+            let res: PylosEmbedResponse = response.json().await?;
+            let mut data = res.data;
+            data.sort_by_key(|d| d.index);
+            Ok(data.into_iter().map(|d| d.embedding).collect())
+        } else {
+            let api_key = match &self.llm_api_key {
+                Some(key) => key,
+                None => {
+                    return Err(GraphonError::Classifier(
+                        "LLM_API_KEY/PYLOS_EMBEDDING_MODEL not configured. Cannot generate embeddings.".to_string(),
+                    ))
+                }
+            };
 
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:batchEmbedContents?key={}",
-            api_key
-        );
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:batchEmbedContents?key={}",
+                api_key
+            );
 
-        let requests = texts
-            .iter()
-            .map(|t| EmbedRequest {
-                model: "models/text-embedding-004".to_string(),
-                content: EmbedContent {
-                    parts: vec![EmbedPart { text: t.clone() }],
-                },
-            })
-            .collect();
+            let requests = texts
+                .iter()
+                .map(|t| EmbedRequest {
+                    model: "models/text-embedding-004".to_string(),
+                    content: EmbedContent {
+                        parts: vec![EmbedPart { text: t.clone() }],
+                    },
+                })
+                .collect();
 
-        let body = BatchEmbedRequest { requests };
-        let response = self.client.post(&url).json(&body).send().await?;
+            let body = BatchEmbedRequest { requests };
+            let response = self.client.post(&url).json(&body).send().await?;
 
-        if !response.status().is_success() {
-            let err = response.text().await.unwrap_or_default();
-            return Err(GraphonError::Classifier(format!(
-                "Gemini Embedding API error: {}",
-                err
-            )));
+            if !response.status().is_success() {
+                let err = response.text().await.unwrap_or_default();
+                return Err(GraphonError::Classifier(format!(
+                    "Gemini Embedding API error: {}",
+                    err
+                )));
+            }
+
+            let res: BatchEmbedResponse = response.json().await?;
+            Ok(res.embeddings.into_iter().map(|e| e.values).collect())
         }
-
-        let res: BatchEmbedResponse = response.json().await?;
-        Ok(res.embeddings.into_iter().map(|e| e.values).collect())
     }
 
     async fn get_single_embedding(&self, text: &str) -> Result<Vec<f32>, GraphonError> {
-        let api_key = match &self.llm_api_key {
-            Some(key) => key,
-            None => {
-                return Err(GraphonError::Classifier(
-                    "LLM_API_KEY not configured. Cannot generate embeddings.".to_string(),
-                ))
+        if let Some(ref model) = self.pylos_embedding_model {
+            let base_url = self.pylos_base_url.as_deref().unwrap_or("http://localhost:3000");
+            let url = format!("{}/v1/embeddings", base_url.trim_end_matches('/'));
+            let body = PylosEmbedRequest {
+                model: model.clone(),
+                input: vec![text.to_string()],
+            };
+            let mut req = self.client.post(&url).json(&body);
+            if let Some(ref key) = self.pylos_api_key {
+                req = req.header("Authorization", format!("Bearer {}", key));
             }
-        };
-
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={}",
-            api_key
-        );
-
-        let body = serde_json::json!({
-            "model": "models/text-embedding-004",
-            "content": {
-                "parts": [{"text": text}]
+            let response = req.send().await?;
+            if !response.status().is_success() {
+                let err = response.text().await.unwrap_or_default();
+                return Err(GraphonError::Classifier(format!(
+                    "Pylos Embedding API error: {}",
+                    err
+                )));
             }
-        });
+            let res: PylosEmbedResponse = response.json().await?;
+            let embedding = res.data.into_iter().next().map(|d| d.embedding).ok_or_else(|| {
+                GraphonError::Classifier("Pylos embedding returned empty results".to_string())
+            })?;
+            Ok(embedding)
+        } else {
+            let api_key = match &self.llm_api_key {
+                Some(key) => key,
+                None => {
+                    return Err(GraphonError::Classifier(
+                        "LLM_API_KEY/PYLOS_EMBEDDING_MODEL not configured. Cannot generate embeddings.".to_string(),
+                    ))
+                }
+            };
 
-        let response = self.client.post(&url).json(&body).send().await?;
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={}",
+                api_key
+            );
 
-        if !response.status().is_success() {
-            let err = response.text().await.unwrap_or_default();
-            return Err(GraphonError::Classifier(format!(
-                "Gemini Embedding API error: {}",
-                err
-            )));
+            let body = serde_json::json!({
+                "model": "models/text-embedding-004",
+                "content": {
+                    "parts": [{"text": text}]
+                }
+            });
+
+            let response = self.client.post(&url).json(&body).send().await?;
+
+            if !response.status().is_success() {
+                let err = response.text().await.unwrap_or_default();
+                return Err(GraphonError::Classifier(format!(
+                    "Gemini Embedding API error: {}",
+                    err
+                )));
+            }
+
+            #[derive(Deserialize)]
+            struct EmbedResponse {
+                embedding: Embedding,
+            }
+
+            let res: EmbedResponse = response.json().await?;
+            Ok(res.embedding.values)
         }
-
-        #[derive(Deserialize)]
-        struct EmbedResponse {
-            embedding: Embedding,
-        }
-
-        let res: EmbedResponse = response.json().await?;
-        Ok(res.embedding.values)
     }
 }
 
