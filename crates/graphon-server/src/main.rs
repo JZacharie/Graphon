@@ -287,37 +287,31 @@ async fn sync_handler(
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(300);
 
-    match timeout(Duration::from_secs(sync_timeout), pipeline.run()).await {
-        Ok(Ok(_)) => Ok(Json(
-            serde_json::json!({ "status": "success", "message": "Mail sync completed." }),
-        )),
-        Ok(Err(err)) => {
-            state
-                .metrics
-                .sync_errors_total
-                .fetch_add(1, Ordering::Relaxed);
-            error!("Sync handler error: {:?}", err);
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::json!({ "status": "error", "message": "An internal system error occurred during sync." }),
-                ),
-            ))
+    let metrics = state.metrics.clone();
+    tokio::spawn(async move {
+        match timeout(Duration::from_secs(sync_timeout), pipeline.run()).await {
+            Ok(Ok(_)) => {
+                info!("Background mail sync completed successfully.");
+            }
+            Ok(Err(err)) => {
+                metrics
+                    .sync_errors_total
+                    .fetch_add(1, Ordering::Relaxed);
+                error!("Background sync pipeline error: {:?}", err);
+            }
+            Err(_) => {
+                metrics
+                    .sync_errors_total
+                    .fetch_add(1, Ordering::Relaxed);
+                error!("Background sync pipeline timed out after {} seconds.", sync_timeout);
+            }
         }
-        Err(_) => {
-            state
-                .metrics
-                .sync_errors_total
-                .fetch_add(1, Ordering::Relaxed);
-            error!("Sync handler timed out after {} seconds.", sync_timeout);
-            Err((
-                StatusCode::GATEWAY_TIMEOUT,
-                Json(
-                    serde_json::json!({ "status": "error", "message": "Sync timed out. Gmail API may be slow." }),
-                ),
-            ))
-        }
-    }
+    });
+
+    Ok(Json(serde_json::json!({
+        "status": "success",
+        "message": "La synchronisation et le tri ont été démarrés en arrière-plan !"
+    })))
 }
 
 async fn rag_index_handler(

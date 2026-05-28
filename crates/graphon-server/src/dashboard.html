@@ -585,17 +585,20 @@
             const originalText = syncBtn.textContent;
             syncBtn.disabled = true;
             syncBtn.className = 'btn btn-secondary';
-            syncBtn.innerHTML = '<span class="loading-dots">Synchronisation en cours</span>';
+            syncBtn.innerHTML = '<span class="loading-dots">Lancement en cours</span>';
 
             try {
                 showToast('Démarrage du tri de mail Gmail...', 'success');
                 const response = await fetch('/sync', { method: 'POST' });
+                const data = await response.json();
                 if (!response.ok) {
-                    const errData = await response.json();
-                    throw new Error(errData.message || 'La synchronisation a échoué');
+                    throw new Error(data.message || 'La synchronisation a échoué');
                 }
-                showToast('Synchronisation et tri terminés avec succès !', 'success');
+                showToast(data.message || 'La synchronisation a été lancée en arrière-plan !', 'success');
+                // Refresh dashboard immediately and then after 5s and 10s to reflect background progress
                 await loadDashboardData();
+                setTimeout(loadDashboardData, 3000);
+                setTimeout(loadDashboardData, 8000);
             } catch (err) {
                 showToast(err.message, 'error');
             } finally {
