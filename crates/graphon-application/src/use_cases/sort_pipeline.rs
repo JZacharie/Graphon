@@ -66,7 +66,9 @@ impl MailSortingPipeline {
                 .await?;
 
             // Step 3: Persistance pour le RAG
+            debug!("Saving email ID {} to storage...", email.id);
             self.storage.save_email(&email).await?;
+            debug!("Email ID {} saved to storage.", email.id);
         }
 
         // 2. Apply Retention Rules (Purge)

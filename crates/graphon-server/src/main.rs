@@ -8,6 +8,7 @@ use clap::Parser;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio::time::{timeout, Duration};
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -263,21 +264,38 @@ async fn sync_handler(
         state.storage.clone(),
     );
 
-    match pipeline.run().await {
-        Ok(_) => Ok(Json(
+    let sync_timeout = std::env::var("SYNC_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(300);
+
+    match timeout(Duration::from_secs(sync_timeout), pipeline.run()).await {
+        Ok(Ok(_)) => Ok(Json(
             serde_json::json!({ "status": "success", "message": "Mail sync completed." }),
         )),
-        Err(err) => {
+        Ok(Err(err)) => {
             state
                 .metrics
                 .sync_errors_total
                 .fetch_add(1, Ordering::Relaxed);
             error!("Sync handler error: {:?}", err);
-            // Secure response: do not expose underlying database/system errors to user
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(
                     serde_json::json!({ "status": "error", "message": "An internal system error occurred during sync." }),
+                ),
+            ))
+        }
+        Err(_) => {
+            state
+                .metrics
+                .sync_errors_total
+                .fetch_add(1, Ordering::Relaxed);
+            error!("Sync handler timed out after {} seconds.", sync_timeout);
+            Err((
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(
+                    serde_json::json!({ "status": "error", "message": "Sync timed out. Gmail API may be slow." }),
                 ),
             ))
         }

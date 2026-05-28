@@ -88,20 +88,30 @@ struct Header {
 
 impl GmailClient {
     pub fn new(token: Option<String>) -> Self {
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap_or_default();
         Self {
-            client: reqwest::Client::new(),
+            client,
             _api_url: "https://gmail.googleapis.com/gmail/v1".to_string(),
             token: RwLock::new(token),
         }
     }
 
     pub fn set_token(&self, new_token: String) {
-        let mut token_guard = self.token.write().unwrap();
-        *token_guard = Some(new_token);
+        match self.token.write() {
+            Ok(mut guard) => *guard = Some(new_token),
+            Err(poisoned) => {
+                let mut guard = poisoned.into_inner();
+                *guard = Some(new_token);
+            }
+        }
     }
 
     pub fn get_token(&self) -> Option<String> {
-        self.token.read().unwrap().clone()
+        self.token.read().ok().and_then(|g| g.clone())
     }
 
     async fn fetch_message_ids(&self, query: &str) -> Result<Vec<MessageRef>, GraphonError> {
@@ -133,10 +143,12 @@ impl GmailClient {
     }
 
     async fn fetch_message_details(&self, id: &str) -> Result<Email, GraphonError> {
-        let token = {
-            let token_guard = self.token.read().unwrap();
-            token_guard.as_ref().cloned().unwrap()
-        };
+        let token = self
+            .token
+            .read()
+            .ok()
+            .and_then(|g| g.clone())
+            .ok_or_else(|| GraphonError::Gmail("No OAuth token available".to_string()))?;
         let url = format!("{}/users/me/messages/{}?format=full", self._api_url, id);
 
         let response = self.client.get(&url).bearer_auth(token).send().await?;
@@ -386,15 +398,19 @@ fn decode_base64url(s: &str) -> Option<Vec<u8>> {
     Some(output)
 }
 
+fn read_token(token: &RwLock<Option<String>>) -> Option<String> {
+    token.read().ok().and_then(|g| g.clone())
+}
+
 #[async_trait]
 impl GmailPort for GmailClient {
     fn get_token(&self) -> Option<String> {
-        self.token.read().unwrap().clone()
+        read_token(&self.token)
     }
 
     async fn fetch_unread_emails(&self) -> Result<Vec<Email>, GraphonError> {
         info!("Fetching unread emails from Gmail...");
-        if self.token.read().unwrap().is_none() {
+        if read_token(&self.token).is_none() {
             warn!("Gmail OAuth token not provided. Falling back to mock emails for local run.");
             return Ok(vec![
                 Email {
@@ -443,7 +459,7 @@ impl GmailPort for GmailClient {
 
     async fn fetch_emails_by_query(&self, query: &str) -> Result<Vec<Email>, GraphonError> {
         info!("Fetching emails matching Gmail query: '{}'", query);
-        if self.token.read().unwrap().is_none() {
+        if read_token(&self.token).is_none() {
             return Ok(vec![Email {
                 id: "msg789".to_string(),
                 thread_id: "thread789".to_string(),
@@ -473,15 +489,11 @@ impl GmailPort for GmailClient {
 
     async fn apply_labels(&self, email_id: &str, labels: &[String]) -> Result<(), GraphonError> {
         info!("Applying labels {:?} to email ID {}", labels, email_id);
-        if self.token.read().unwrap().is_none() {
-            return Ok(());
-        }
-        let token = {
-            let token_guard = self.token.read().unwrap();
-            token_guard.as_ref().cloned().unwrap()
+        let token = match read_token(&self.token) {
+            Some(t) => t,
+            None => return Ok(()),
         };
 
-        // Resolve label names to IDs
         let mut label_ids = Vec::new();
         for label in labels {
             match self.get_or_create_label_id(&token, label).await {
@@ -518,15 +530,11 @@ impl GmailPort for GmailClient {
 
     async fn remove_labels(&self, email_id: &str, labels: &[String]) -> Result<(), GraphonError> {
         info!("Removing labels {:?} from email ID {}", labels, email_id);
-        if self.token.read().unwrap().is_none() {
-            return Ok(());
-        }
-        let token = {
-            let token_guard = self.token.read().unwrap();
-            token_guard.as_ref().cloned().unwrap()
+        let token = match read_token(&self.token) {
+            Some(t) => t,
+            None => return Ok(()),
         };
 
-        // Resolve label names to IDs
         let mut label_ids = Vec::new();
         for label in labels {
             match self.get_or_create_label_id(&token, label).await {
@@ -563,12 +571,9 @@ impl GmailPort for GmailClient {
 
     async fn trash_email(&self, email_id: &str) -> Result<(), GraphonError> {
         info!("Trashing email ID {}", email_id);
-        if self.token.read().unwrap().is_none() {
-            return Ok(());
-        }
-        let token = {
-            let token_guard = self.token.read().unwrap();
-            token_guard.as_ref().cloned().unwrap()
+        let token = match read_token(&self.token) {
+            Some(t) => t,
+            None => return Ok(()),
         };
         let url = format!("{}/users/me/messages/{}/trash", self._api_url, email_id);
 

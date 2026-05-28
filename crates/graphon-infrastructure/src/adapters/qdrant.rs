@@ -70,8 +70,13 @@ impl QdrantAdapter {
             qdrant_url.unwrap_or_else(|| "http://qdrant.qdrant.svc.cluster.local:6333".to_string());
         let collection_name = collection_name.unwrap_or_else(|| "emails".to_string());
         let vector_size = vector_size.unwrap_or(768);
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
         Self {
-            client: reqwest::Client::new(),
+            client,
             qdrant_url,
             collection_name,
             vector_size,
