@@ -16,10 +16,12 @@ fn encode_query(s: &str) -> String {
         .collect()
 }
 
+use std::sync::RwLock;
+
 pub struct GmailClient {
     client: reqwest::Client,
     _api_url: String,
-    token: Option<String>,
+    token: RwLock<Option<String>>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -78,14 +80,26 @@ impl GmailClient {
         Self {
             client: reqwest::Client::new(),
             _api_url: "https://gmail.googleapis.com/gmail/v1".to_string(),
-            token,
+            token: RwLock::new(token),
         }
     }
 
+    pub fn set_token(&self, new_token: String) {
+        let mut token_guard = self.token.write().unwrap();
+        *token_guard = Some(new_token);
+    }
+
+    pub fn get_token(&self) -> Option<String> {
+        self.token.read().unwrap().clone()
+    }
+
     async fn fetch_message_ids(&self, query: &str) -> Result<Vec<MessageRef>, GraphonError> {
-        let token = match &self.token {
-            Some(t) => t,
-            None => return Err(GraphonError::Gmail("No OAuth token provided".to_string())),
+        let token = {
+            let token_guard = self.token.read().unwrap();
+            match &*token_guard {
+                Some(t) => t.clone(),
+                None => return Err(GraphonError::Gmail("No OAuth token provided".to_string())),
+            }
         };
 
         let url = format!(
@@ -108,7 +122,10 @@ impl GmailClient {
     }
 
     async fn fetch_message_details(&self, id: &str) -> Result<Email, GraphonError> {
-        let token = self.token.as_ref().unwrap();
+        let token = {
+            let token_guard = self.token.read().unwrap();
+            token_guard.as_ref().cloned().unwrap()
+        };
         let url = format!("{}/users/me/messages/{}?format=full", self._api_url, id);
 
         let response = self.client.get(&url).bearer_auth(token).send().await?;
@@ -293,9 +310,13 @@ fn decode_base64url(s: &str) -> Option<Vec<u8>> {
 
 #[async_trait]
 impl GmailPort for GmailClient {
+    fn get_token(&self) -> Option<String> {
+        self.token.read().unwrap().clone()
+    }
+
     async fn fetch_unread_emails(&self) -> Result<Vec<Email>, GraphonError> {
         info!("Fetching unread emails from Gmail...");
-        if self.token.is_none() {
+        if self.token.read().unwrap().is_none() {
             warn!("Gmail OAuth token not provided. Falling back to mock emails for local run.");
             return Ok(vec![
                 Email {
@@ -344,7 +365,7 @@ impl GmailPort for GmailClient {
 
     async fn fetch_emails_by_query(&self, query: &str) -> Result<Vec<Email>, GraphonError> {
         info!("Fetching emails matching Gmail query: '{}'", query);
-        if self.token.is_none() {
+        if self.token.read().unwrap().is_none() {
             return Ok(vec![Email {
                 id: "msg789".to_string(),
                 thread_id: "thread789".to_string(),
@@ -374,10 +395,13 @@ impl GmailPort for GmailClient {
 
     async fn apply_labels(&self, email_id: &str, labels: &[String]) -> Result<(), GraphonError> {
         info!("Applying labels {:?} to email ID {}", labels, email_id);
-        if self.token.is_none() {
+        if self.token.read().unwrap().is_none() {
             return Ok(());
         }
-        let token = self.token.as_ref().unwrap();
+        let token = {
+            let token_guard = self.token.read().unwrap();
+            token_guard.as_ref().cloned().unwrap()
+        };
         let url = format!("{}/users/me/messages/{}/modify", self._api_url, email_id);
 
         let body = serde_json::json!({
@@ -404,10 +428,13 @@ impl GmailPort for GmailClient {
 
     async fn remove_labels(&self, email_id: &str, labels: &[String]) -> Result<(), GraphonError> {
         info!("Removing labels {:?} from email ID {}", labels, email_id);
-        if self.token.is_none() {
+        if self.token.read().unwrap().is_none() {
             return Ok(());
         }
-        let token = self.token.as_ref().unwrap();
+        let token = {
+            let token_guard = self.token.read().unwrap();
+            token_guard.as_ref().cloned().unwrap()
+        };
         let url = format!("{}/users/me/messages/{}/modify", self._api_url, email_id);
 
         let body = serde_json::json!({
@@ -434,10 +461,13 @@ impl GmailPort for GmailClient {
 
     async fn trash_email(&self, email_id: &str) -> Result<(), GraphonError> {
         info!("Trashing email ID {}", email_id);
-        if self.token.is_none() {
+        if self.token.read().unwrap().is_none() {
             return Ok(());
         }
-        let token = self.token.as_ref().unwrap();
+        let token = {
+            let token_guard = self.token.read().unwrap();
+            token_guard.as_ref().cloned().unwrap()
+        };
         let url = format!("{}/users/me/messages/{}/trash", self._api_url, email_id);
 
         let response = self.client.post(&url).bearer_auth(token).send().await?;

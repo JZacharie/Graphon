@@ -805,6 +805,7 @@ dependencies = [
  "graphon-application",
  "graphon-core",
  "graphon-infrastructure",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

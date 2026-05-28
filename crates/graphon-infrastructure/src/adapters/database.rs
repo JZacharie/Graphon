@@ -185,6 +185,77 @@ impl StoragePort for DatabaseAdapter {
         }
     }
 
+    async fn get_recent_emails(&self, limit: usize) -> Result<Vec<Email>, GraphonError> {
+        match &self.connection {
+            DatabaseConnection::Postgres(pool) => {
+                let rows = sqlx::query(
+                    "SELECT id, thread_id, sender, recipient, subject, body, date, labels FROM emails ORDER BY date DESC LIMIT $1;"
+                )
+                .bind(limit as i32)
+                .fetch_all(pool)
+                .await?;
+
+                let mut emails = Vec::new();
+                for row in rows {
+                    let email_id: String = row.get("id");
+
+                    let attachments_rows = sqlx::query(
+                        "SELECT id, filename, mime_type, size, data FROM attachments WHERE email_id = $1;"
+                    )
+                    .bind(&email_id)
+                    .fetch_all(pool)
+                    .await?;
+
+                    let attachments = attachments_rows
+                        .into_iter()
+                        .map(|r| Attachment {
+                            id: r.get("id"),
+                            filename: r.get("filename"),
+                            mime_type: r.get("mime_type"),
+                            size: r.get::<i32, _>("size") as usize,
+                            data: r.get("data"),
+                        })
+                        .collect();
+
+                    emails.push(Email {
+                        id: email_id,
+                        thread_id: row.get("thread_id"),
+                        from: row.get("sender"),
+                        to: row.get("recipient"),
+                        subject: row.get("subject"),
+                        body: row.get("body"),
+                        date: row.get("date"),
+                        labels: row.get("labels"),
+                        attachments,
+                    });
+                }
+                Ok(emails)
+            }
+            DatabaseConnection::Mock(store) => {
+                let store = store.lock().unwrap();
+                let mut emails: Vec<Email> = store.emails.values().cloned().collect();
+                emails.sort_by_key(|b| std::cmp::Reverse(b.date));
+                emails.truncate(limit);
+                Ok(emails)
+            }
+        }
+    }
+
+    async fn get_emails_count(&self) -> Result<i64, GraphonError> {
+        match &self.connection {
+            DatabaseConnection::Postgres(pool) => {
+                let row = sqlx::query("SELECT COUNT(*) FROM emails;")
+                    .fetch_one(pool)
+                    .await?;
+                Ok(row.get::<i64, _>(0))
+            }
+            DatabaseConnection::Mock(store) => {
+                let store = store.lock().unwrap();
+                Ok(store.emails.len() as i64)
+            }
+        }
+    }
+
     async fn save_retention_rule(&self, rule: &RetentionRule) -> Result<(), GraphonError> {
         match &self.connection {
             DatabaseConnection::Postgres(pool) => {

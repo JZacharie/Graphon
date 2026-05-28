@@ -8,6 +8,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # Pas de couleur
 
+cargo fmt --all
 echo -e "${BLUE}=== Lancement des vérifications locales (Pipeline Rapide) ===${NC}"
 
 # 1. Vérification du formatage

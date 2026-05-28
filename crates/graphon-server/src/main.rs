@@ -1,6 +1,6 @@
 use axum::{
     http::StatusCode,
-    response::IntoResponse,
+    response::{Html, IntoResponse, Redirect},
     routing::{get, post},
     Extension, Json, Router,
 };
@@ -52,10 +52,13 @@ impl ServerMetrics {
 
 struct AppState {
     gmail_client: Arc<dyn GmailPort>,
+    gmail_client_adapter: Arc<GmailClient>,
     classifier: Arc<dyn ClassifierPort>,
     storage: Arc<dyn StoragePort>,
     rag_indexer: Arc<RagIndexer>,
     metrics: Arc<ServerMetrics>,
+    google_client_id: Option<String>,
+    google_client_secret: Option<String>,
 }
 
 #[tokio::main]
@@ -72,9 +75,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let database_url = std::env::var("DATABASE_URL").ok();
     let gmail_token = std::env::var("GMAIL_TOKEN").ok();
     let llm_key = std::env::var("LLM_API_KEY").ok();
+    let google_client_id = std::env::var("GOOGLE_CLIENT_ID").ok();
+    let google_client_secret = std::env::var("GOOGLE_CLIENT_SECRET").ok();
 
     // Initialize adapters
-    let gmail_client = Arc::new(GmailClient::new(gmail_token));
+    let gmail_client_adapter = Arc::new(GmailClient::new(gmail_token));
+    let gmail_client = gmail_client_adapter.clone() as Arc<dyn GmailPort>;
     let classifier = Arc::new(ClassifierAdapter::new(llm_key));
     let storage = Arc::new(DatabaseAdapter::new(database_url.as_deref()).await?);
     let rag_indexer = Arc::new(RagIndexer::new(storage.clone()));
@@ -82,10 +88,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app_state = Arc::new(AppState {
         gmail_client: gmail_client.clone(),
+        gmail_client_adapter,
         classifier: classifier.clone(),
         storage: storage.clone(),
         rag_indexer,
         metrics,
+        google_client_id,
+        google_client_secret,
     });
 
     if args.sync || args.clean {
@@ -102,6 +111,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.server {
         // Build router
         let app = Router::new()
+            .route("/", get(dashboard_handler))
+            .route("/sso/complete/google-oauth2/", get(oauth_callback_handler))
+            .route("/api/stats", get(api_stats_handler))
+            .route("/api/emails", get(api_emails_handler))
             .route("/health", get(health_handler))
             .route("/metrics", get(metrics_handler))
             .route("/sync", post(sync_handler))
@@ -224,6 +237,176 @@ async fn rag_index_handler(
                     serde_json::json!({ "status": "error", "message": "Failed to index email for RAG." }),
                 ),
             ))
+        }
+    }
+}
+
+async fn dashboard_handler(Extension(state): Extension<Arc<AppState>>) -> impl IntoResponse {
+    let current_token = state.gmail_client.get_token();
+    let is_token_valid = match current_token {
+        Some(ref t) => !t.is_empty() && t != "placeholder_gmail_token",
+        None => false,
+    };
+
+    if !is_token_valid {
+        if let Some(ref client_id) = state.google_client_id {
+            let auth_url = format!(
+                "https://accounts.google.com/o/oauth2/auth?\
+                 client_id={}&\
+                 redirect_uri=https://graphon.p.zacharie.org/sso/complete/google-oauth2/&\
+                 response_type=code&\
+                 scope=https://mail.google.com/&\
+                 access_type=offline&\
+                 prompt=consent",
+                client_id
+            );
+            return Redirect::temporary(&auth_url).into_response();
+        } else {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Google Client ID not configured. Please check your Vault secret (ai/graphon) or environment.",
+            )
+                .into_response();
+        }
+    }
+
+    Html(include_str!("dashboard.html")).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct CallbackParams {
+    code: String,
+}
+
+async fn oauth_callback_handler(
+    axum::extract::Query(params): axum::extract::Query<CallbackParams>,
+    Extension(state): Extension<Arc<AppState>>,
+) -> impl IntoResponse {
+    let client_id = match &state.google_client_id {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Missing GOOGLE_CLIENT_ID",
+            )
+                .into_response()
+        }
+    };
+    let client_secret = match &state.google_client_secret {
+        Some(secret) => secret,
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Missing GOOGLE_CLIENT_SECRET",
+            )
+                .into_response()
+        }
+    };
+
+    let client = reqwest::Client::new();
+    let token_res = match client
+        .post("https://oauth2.googleapis.com/token")
+        .form(&[
+            ("code", &params.code),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            (
+                "redirect_uri",
+                &"https://graphon.p.zacharie.org/sso/complete/google-oauth2/".to_string(),
+            ),
+            ("grant_type", &"authorization_code".to_string()),
+        ])
+        .send()
+        .await
+    {
+        Ok(res) => res,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to send token request: {:?}", e),
+            )
+                .into_response()
+        }
+    };
+
+    if !token_res.status().is_success() {
+        let err_text = token_res.text().await.unwrap_or_default();
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("Token exchange failed: {}", err_text),
+        )
+            .into_response();
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TokenResponse {
+        access_token: String,
+    }
+
+    let tokens: TokenResponse = match token_res.json().await {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to parse token response: {:?}", e),
+            )
+                .into_response()
+        }
+    };
+
+    // Update in-memory token
+    state
+        .gmail_client_adapter
+        .set_token(tokens.access_token.clone());
+
+    // Sync back to Vault
+    if let Ok(vault_token) = std::env::var("VAULT_TOKEN") {
+        let payload = serde_json::json!({
+            "data": {
+                "gmail_token": tokens.access_token,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "project_id": "graphon-497704"
+            }
+        });
+
+        let _ = client
+            .post("https://vault.p.zacharie.org/v1/secret/data/ai/graphon")
+            .header("X-Vault-Token", &vault_token)
+            .json(&payload)
+            .send()
+            .await;
+    } else {
+        info!("VAULT_TOKEN not configured; skipping sync to Vault.");
+    }
+
+    Redirect::temporary("/").into_response()
+}
+
+async fn api_stats_handler(Extension(state): Extension<Arc<AppState>>) -> impl IntoResponse {
+    let total_syncs = state.metrics.sync_requests_total.load(Ordering::Relaxed);
+    let sync_errors = state.metrics.sync_errors_total.load(Ordering::Relaxed);
+    let emails_count = match state.storage.get_emails_count().await {
+        Ok(count) => count,
+        Err(e) => {
+            error!("Failed to get emails count: {:?}", e);
+            0
+        }
+    };
+
+    Json(serde_json::json!({
+        "total_syncs": total_syncs,
+        "sync_errors": sync_errors,
+        "emails_count": emails_count
+    }))
+}
+
+async fn api_emails_handler(Extension(state): Extension<Arc<AppState>>) -> impl IntoResponse {
+    match state.storage.get_recent_emails(50).await {
+        Ok(emails) => Json(serde_json::json!(emails)).into_response(),
+        Err(err) => {
+            error!("Failed to list emails: {:?}", err);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to load emails").into_response()
         }
     }
 }
