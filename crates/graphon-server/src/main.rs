@@ -439,7 +439,11 @@ async fn dashboard_handler(Extension(state): Extension<Arc<AppState>>) -> impl I
                  prompt=consent",
                 client_id
             );
-            return Redirect::temporary(&auth_url).into_response();
+            let html_redirect = format!(
+                r#"<!DOCTYPE html><html><head><script>window.top.location.href = "{}";</script></head><body>Redirecting to Google Auth...</body></html>"#,
+                auth_url
+            );
+            return Html(html_redirect).into_response();
         } else {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
