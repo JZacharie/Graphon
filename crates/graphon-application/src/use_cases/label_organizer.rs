@@ -153,7 +153,11 @@ impl LabelOrganizer {
         let mut deleted = 0;
 
         for label in &labels {
-            if label.is_system() || is_graphon_label(&label.name) || is_nested_label(&label.name) {
+            if label.is_system()
+                || is_graphon_label(&label.name)
+                || is_nested_label(&label.name)
+                || is_star_label(&label.name)
+            {
                 continue;
             }
             if label.is_empty() {
