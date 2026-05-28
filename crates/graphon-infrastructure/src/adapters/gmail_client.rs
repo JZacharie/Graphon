@@ -257,6 +257,38 @@ impl GmailClient {
             }
         }
     }
+
+    async fn create_label(&self, token: &str, label: &str) -> Result<(), GraphonError> {
+        info!("Attempting to create label: {}", label);
+        let url = format!("{}/users/me/labels", self._api_url);
+        let body = serde_json::json!({
+            "name": label,
+            "labelListVisibility": "labelShow",
+            "messageListVisibility": "show"
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await?;
+
+        if response.status().is_success() || response.status() == reqwest::StatusCode::CONFLICT {
+            Ok(())
+        } else {
+            let err_body = response.text().await.unwrap_or_default();
+            if err_body.contains("alreadyExists") || err_body.contains("Label name exists") {
+                Ok(())
+            } else {
+                Err(GraphonError::Gmail(format!(
+                    "Failed to create label {}: {}",
+                    label, err_body
+                )))
+            }
+        }
+    }
 }
 
 fn decode_base64url(s: &str) -> Option<Vec<u8>> {
@@ -411,13 +443,39 @@ impl GmailPort for GmailClient {
         let response = self
             .client
             .post(&url)
-            .bearer_auth(token)
+            .bearer_auth(&token)
             .json(&body)
             .send()
             .await?;
 
         if !response.status().is_success() {
             let err_body = response.text().await.unwrap_or_default();
+            if err_body.contains("Invalid label") {
+                info!("Invalid label detected. Attempting to create missing custom labels...");
+                for label in labels {
+                    if !is_system_label(label) {
+                        if let Err(e) = self.create_label(&token, label).await {
+                            warn!("Failed to create custom label {}: {:?}", label, e);
+                        }
+                    }
+                }
+                // Retry modifying after attempting to create labels
+                let retry_response = self
+                    .client
+                    .post(&url)
+                    .bearer_auth(&token)
+                    .json(&body)
+                    .send()
+                    .await?;
+                if retry_response.status().is_success() {
+                    return Ok(());
+                }
+                let retry_err_body = retry_response.text().await.unwrap_or_default();
+                return Err(GraphonError::Gmail(format!(
+                    "Failed to apply labels after retry: {}",
+                    retry_err_body
+                )));
+            }
             return Err(GraphonError::Gmail(format!(
                 "Failed to apply labels: {}",
                 err_body
@@ -481,4 +539,24 @@ impl GmailPort for GmailClient {
         }
         Ok(())
     }
+}
+
+fn is_system_label(label: &str) -> bool {
+    matches!(
+        label,
+        "INBOX"
+            | "SPAM"
+            | "TRASH"
+            | "UNREAD"
+            | "STARRED"
+            | "IMPORTANT"
+            | "DRAFT"
+            | "SENT"
+            | "CHAT"
+            | "CATEGORY_PERSONAL"
+            | "CATEGORY_SOCIAL"
+            | "CATEGORY_PROMOTIONS"
+            | "CATEGORY_UPDATES"
+            | "CATEGORY_FORUMS"
+    )
 }
