@@ -181,6 +181,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "/api/labels/consolidate/:prefix/:target",
                 post(api_labels_consolidate_handler),
             )
+            .route("/v1/chat/completions", post(chat_completions_handler))
             .layer(TraceLayer::new_for_http())
             .layer(Extension(app_state));
 
@@ -674,4 +675,112 @@ async fn api_labels_consolidate_handler(
             ))
         }
     }
+}
+
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(serde::Deserialize, Clone, Debug)]
+struct ChatCompletionRequest {
+    #[allow(dead_code)]
+    model: String,
+    messages: Vec<ChatMessage>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    stream: bool,
+}
+
+async fn chat_completions_handler(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(input): Json<ChatCompletionRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let user_query = input
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+
+    let mut context_text = String::new();
+    if !user_query.is_empty() {
+        if let Ok(results) = state.rag_indexer.search(&user_query, 5).await {
+            if !results.is_empty() {
+                context_text.push_str("Voici les emails pertinents trouvés dans les archives pour vous aider à répondre:\n\n");
+                for (i, res) in results.iter().enumerate() {
+                    context_text.push_str(&format!(
+                        "--- EMAIL #{i} ---\nDe: {sender}\nObjet: {subject}\nContenu:\n{content}\n\n",
+                        i = i + 1,
+                        sender = res.sender,
+                        subject = res.subject,
+                        content = res.content
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut outbound_messages = Vec::new();
+    if !context_text.is_empty() {
+        outbound_messages.push(ChatMessage {
+            role: "system".to_string(),
+            content: format!(
+                "Tu es un assistant d'archivage d'emails. Utilise les emails pertinents suivants pour répondre à l'utilisateur de manière précise, concise et en français:\n\n{}",
+                context_text
+            ),
+        });
+    }
+
+    for msg in &input.messages {
+        outbound_messages.push(msg.clone());
+    }
+
+    let pylos_base_url = std::env::var("PYLOS_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".into());
+    let pylos_api_key = std::env::var("PYLOS_API_KEY").ok();
+    let pylos_model = std::env::var("PYLOS_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".into());
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/chat/completions", pylos_base_url.trim_end_matches('/'));
+
+    let pylos_payload = serde_json::json!({
+        "model": pylos_model,
+        "messages": outbound_messages,
+        "stream": false
+    });
+
+    let mut req = client.post(&url).json(&pylos_payload);
+    if let Some(ref api_key) = pylos_api_key {
+        req = req.header("Authorization", format!("Bearer {}", api_key));
+    }
+
+    let response = req.send().await.map_err(|e| {
+        error!("Failed to connect to Pylos: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "status": "error", "message": format!("Pylos connection failed: {}", e) })),
+        )
+    })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let err_text = response.text().await.unwrap_or_default();
+        error!("Pylos returned error status: {}, body: {}", status, err_text);
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "status": "error", "message": format!("Pylos returned error: {}", err_text) })),
+        ));
+    }
+
+    let response_json: serde_json::Value = response.json().await.map_err(|e| {
+        error!("Failed to parse JSON response from Pylos: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "status": "error", "message": format!("Failed to parse Pylos response: {}", e) })),
+        )
+    })?;
+
+    Ok(Json(response_json))
 }
