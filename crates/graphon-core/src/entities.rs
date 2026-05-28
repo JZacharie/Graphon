@@ -29,3 +29,12 @@ pub struct RetentionRule {
     pub query: String, // Gmail query style, e.g. "from:alerts@system.com"
     pub duration_days: i64,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RagChunk {
+    pub email_id: String,
+    pub subject: String,
+    pub sender: String,
+    pub chunk_index: usize,
+    pub content: String,
+}

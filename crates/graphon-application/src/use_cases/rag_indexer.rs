@@ -1,24 +1,20 @@
+use graphon_core::entities::RagChunk;
 use graphon_core::error::GraphonError;
-use graphon_core::ports::StoragePort;
+use graphon_core::ports::{StoragePort, VectorStorePort};
 use std::sync::Arc;
 use tracing::info;
 
 pub struct RagIndexer {
     storage: Arc<dyn StoragePort>,
-}
-
-#[derive(serde::Serialize)]
-pub struct RagChunk {
-    pub email_id: String,
-    pub subject: String,
-    pub sender: String,
-    pub chunk_index: usize,
-    pub content: String,
+    vector_store: Arc<dyn VectorStorePort>,
 }
 
 impl RagIndexer {
-    pub fn new(storage: Arc<dyn StoragePort>) -> Self {
-        Self { storage }
+    pub fn new(storage: Arc<dyn StoragePort>, vector_store: Arc<dyn VectorStorePort>) -> Self {
+        Self {
+            storage,
+            vector_store,
+        }
     }
 
     pub async fn index_email_for_rag(&self, email_id: &str) -> Result<Vec<RagChunk>, GraphonError> {
@@ -70,6 +66,7 @@ impl RagIndexer {
             chunks.len(),
             email_id
         );
+        self.vector_store.index_chunks(&chunks).await?;
         Ok(chunks)
     }
 }

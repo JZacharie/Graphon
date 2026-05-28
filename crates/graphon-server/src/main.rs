@@ -13,8 +13,8 @@ use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use graphon_application::{MailSortingPipeline, RagIndexer};
-use graphon_core::ports::{ClassifierPort, GmailPort, StoragePort};
-use graphon_infrastructure::{ClassifierAdapter, DatabaseAdapter, GmailClient};
+use graphon_core::ports::{ClassifierPort, GmailPort, StoragePort, VectorStorePort};
+use graphon_infrastructure::{ClassifierAdapter, DatabaseAdapter, GmailClient, QdrantAdapter};
 
 #[derive(Parser, Debug)]
 #[command(name = "graphon-server", about = "Graphon CLI & API Server")]
@@ -85,13 +85,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let llm_key = std::env::var("LLM_API_KEY").ok();
     let google_client_id = std::env::var("GOOGLE_CLIENT_ID").ok();
     let google_client_secret = std::env::var("GOOGLE_CLIENT_SECRET").ok();
+    let qdrant_url = std::env::var("QDRANT_URL").ok();
 
     // Initialize adapters
     let gmail_client_adapter = Arc::new(GmailClient::new(gmail_token));
     let gmail_client = gmail_client_adapter.clone() as Arc<dyn GmailPort>;
-    let classifier = Arc::new(ClassifierAdapter::new(llm_key));
+    let classifier = Arc::new(ClassifierAdapter::new(llm_key.clone()));
     let storage = Arc::new(DatabaseAdapter::new(database_url.as_deref()).await?);
-    let rag_indexer = Arc::new(RagIndexer::new(storage.clone()));
+    let qdrant_adapter = Arc::new(QdrantAdapter::new(qdrant_url, llm_key));
+    let vector_store = qdrant_adapter.clone() as Arc<dyn VectorStorePort>;
+    let rag_indexer = Arc::new(RagIndexer::new(storage.clone(), vector_store));
     let metrics = Arc::new(ServerMetrics::new());
 
     let app_state = Arc::new(AppState {

@@ -27,3 +27,8 @@ pub trait StoragePort: Send + Sync {
     async fn save_retention_rule(&self, rule: &RetentionRule) -> Result<(), GraphonError>;
     async fn get_retention_rules(&self) -> Result<Vec<RetentionRule>, GraphonError>;
 }
+
+#[async_trait]
+pub trait VectorStorePort: Send + Sync {
+    async fn index_chunks(&self, chunks: &[crate::entities::RagChunk]) -> Result<(), GraphonError>;
+}
