@@ -1,0 +1,14 @@
+[package]
+name = "graphon-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+sqlx.workspace = true
+reqwest.workspace = true

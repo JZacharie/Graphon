@@ -1,0 +1,13 @@
+[package]
+name = "graphon-application"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+graphon-core = { path = "../graphon-core" }
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
