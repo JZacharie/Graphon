@@ -3,6 +3,6 @@ pub mod use_cases {
     pub mod sort_pipeline;
 }
 
-pub use graphon_core::entities::RagChunk;
+pub use graphon_core::entities::{RagChunk, SearchQuery, SearchResult};
 pub use use_cases::rag_indexer::RagIndexer;
 pub use use_cases::sort_pipeline::MailSortingPipeline;

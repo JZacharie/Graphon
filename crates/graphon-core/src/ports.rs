@@ -31,4 +31,10 @@ pub trait StoragePort: Send + Sync {
 #[async_trait]
 pub trait VectorStorePort: Send + Sync {
     async fn index_chunks(&self, chunks: &[crate::entities::RagChunk]) -> Result<(), GraphonError>;
+    async fn search(
+        &self,
+        query: &crate::entities::SearchQuery,
+    ) -> Result<Vec<crate::entities::SearchResult>, GraphonError>;
+    async fn create_collection(&self) -> Result<(), GraphonError>;
+    async fn delete_collection(&self) -> Result<(), GraphonError>;
 }

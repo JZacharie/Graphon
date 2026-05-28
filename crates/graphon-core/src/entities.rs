@@ -38,3 +38,19 @@ pub struct RagChunk {
     pub chunk_index: usize,
     pub content: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchResult {
+    pub email_id: String,
+    pub subject: String,
+    pub sender: String,
+    pub chunk_index: usize,
+    pub content: String,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchQuery {
+    pub query_text: String,
+    pub limit: u64,
+}

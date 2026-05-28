@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use graphon_core::entities::RagChunk;
+use graphon_core::entities::{RagChunk, SearchQuery, SearchResult};
 use graphon_core::error::GraphonError;
 use graphon_core::ports::VectorStorePort;
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,8 @@ use tracing::info;
 pub struct QdrantAdapter {
     client: reqwest::Client,
     qdrant_url: String,
+    collection_name: String,
+    vector_size: usize,
     llm_api_key: Option<String>,
 }
 
@@ -42,15 +44,51 @@ struct Embedding {
     values: Vec<f32>,
 }
 
+#[derive(Deserialize)]
+struct QdrantSearchResponse {
+    result: Vec<QdrantScoredPoint>,
+}
+
+#[derive(Deserialize)]
+struct QdrantScoredPoint {
+    #[allow(dead_code)]
+    id: Option<serde_json::Value>,
+    #[allow(dead_code)]
+    version: Option<f64>,
+    score: Option<f64>,
+    payload: Option<serde_json::Value>,
+}
+
 impl QdrantAdapter {
-    pub fn new(qdrant_url: Option<String>, llm_api_key: Option<String>) -> Self {
+    pub fn new(
+        qdrant_url: Option<String>,
+        collection_name: Option<String>,
+        vector_size: Option<usize>,
+        llm_api_key: Option<String>,
+    ) -> Self {
         let qdrant_url =
             qdrant_url.unwrap_or_else(|| "http://qdrant.qdrant.svc.cluster.local:6333".to_string());
+        let collection_name = collection_name.unwrap_or_else(|| "emails".to_string());
+        let vector_size = vector_size.unwrap_or(768);
         Self {
             client: reqwest::Client::new(),
             qdrant_url,
+            collection_name,
+            vector_size,
             llm_api_key,
         }
+    }
+
+    pub fn collection_url(&self) -> String {
+        format!("{}/collections/{}", self.qdrant_url, self.collection_name)
+    }
+
+    pub fn points_url(&self) -> String {
+        format!("{}/collections/{}/points", self.qdrant_url, self.collection_name)
+    }
+
+    pub fn collection_name(&self) -> &str {
+        &self.collection_name
     }
 
     async fn get_embeddings(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, GraphonError> {
@@ -92,29 +130,123 @@ impl QdrantAdapter {
         let res: BatchEmbedResponse = response.json().await?;
         Ok(res.embeddings.into_iter().map(|e| e.values).collect())
     }
+
+    async fn get_single_embedding(&self, text: &str) -> Result<Vec<f32>, GraphonError> {
+        let api_key = match &self.llm_api_key {
+            Some(key) => key,
+            None => {
+                return Err(GraphonError::Classifier(
+                    "LLM_API_KEY not configured. Cannot generate embeddings.".to_string(),
+                ))
+            }
+        };
+
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={}",
+            api_key
+        );
+
+        let body = serde_json::json!({
+            "model": "models/text-embedding-004",
+            "content": {
+                "parts": [{"text": text}]
+            }
+        });
+
+        let response = self.client.post(&url).json(&body).send().await?;
+
+        if !response.status().is_success() {
+            let err = response.text().await.unwrap_or_default();
+            return Err(GraphonError::Classifier(format!(
+                "Gemini Embedding API error: {}",
+                err
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct EmbedResponse {
+            embedding: Embedding,
+        }
+
+        let res: EmbedResponse = response.json().await?;
+        Ok(res.embedding.values)
+    }
 }
 
 #[async_trait]
 impl VectorStorePort for QdrantAdapter {
+    async fn create_collection(&self) -> Result<(), GraphonError> {
+        info!(
+            "Creating/ensuring Qdrant collection '{}'...",
+            self.collection_name
+        );
+        let create_url = self.collection_url();
+        let create_body = serde_json::json!({
+            "vectors": {
+                "size": self.vector_size,
+                "distance": "Cosine"
+            }
+        });
+
+        let response = self.client.put(&create_url).json(&create_body).send().await?;
+
+        if response.status().is_success() {
+            info!(
+                "Qdrant collection '{}' ready.",
+                self.collection_name
+            );
+            Ok(())
+        } else {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            if status == 409 || body.contains("already exists") {
+                info!(
+                    "Qdrant collection '{}' already exists.",
+                    self.collection_name
+                );
+                return Ok(());
+            }
+            Err(GraphonError::Internal(format!(
+                "Failed to create Qdrant collection '{}': {} {}",
+                self.collection_name, status, body
+            )))
+        }
+    }
+
+    async fn delete_collection(&self) -> Result<(), GraphonError> {
+        info!(
+            "Deleting Qdrant collection '{}'...",
+            self.collection_name
+        );
+        let delete_url = self.collection_url();
+        let response = self.client.delete(&delete_url).send().await?;
+
+        if response.status().is_success() || response.status() == 404 {
+            info!(
+                "Qdrant collection '{}' deleted.",
+                self.collection_name
+            );
+            Ok(())
+        } else {
+            let body = response.text().await.unwrap_or_default();
+            Err(GraphonError::Internal(format!(
+                "Failed to delete Qdrant collection '{}': {}",
+                self.collection_name, body
+            )))
+        }
+    }
+
     async fn index_chunks(&self, chunks: &[RagChunk]) -> Result<(), GraphonError> {
         if chunks.is_empty() {
             return Ok(());
         }
 
-        info!("Starting Qdrant indexing for {} chunks...", chunks.len());
+        info!(
+            "Starting Qdrant indexing for {} chunks into '{}'...",
+            chunks.len(),
+            self.collection_name
+        );
 
-        // 1. Ensure collection exists
-        let create_url = format!("{}/collections/emails", self.qdrant_url);
-        let create_body = serde_json::json!({
-            "vectors": {
-                "size": 768,
-                "distance": "Cosine"
-            }
-        });
-
-        let _ = self.client.put(&create_url).json(&create_body).send().await;
-
-        // 2. Fetch embeddings for all chunks in batch
         let texts: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
         let embeddings = self.get_embeddings(&texts).await?;
 
@@ -126,7 +258,6 @@ impl VectorStorePort for QdrantAdapter {
             )));
         }
 
-        // 3. Prepare points for Qdrant
         let mut points = Vec::new();
         for (i, chunk) in chunks.iter().enumerate() {
             let point_id = fnv1a_64(&format!("{}-{}", chunk.email_id, chunk.chunk_index));
@@ -145,8 +276,7 @@ impl VectorStorePort for QdrantAdapter {
             }));
         }
 
-        // 4. Push points to Qdrant
-        let points_url = format!("{}/collections/emails/points?wait=true", self.qdrant_url);
+        let points_url = format!("{}?wait=true", self.points_url());
         let points_body = serde_json::json!({ "points": points });
 
         let response = self
@@ -164,8 +294,72 @@ impl VectorStorePort for QdrantAdapter {
             )));
         }
 
-        info!("Successfully indexed {} chunks in Qdrant.", chunks.len());
+        info!(
+            "Successfully indexed {} chunks into '{}'.",
+            chunks.len(),
+            self.collection_name
+        );
         Ok(())
+    }
+
+    async fn search(
+        &self,
+        query: &SearchQuery,
+    ) -> Result<Vec<SearchResult>, GraphonError> {
+        info!(
+            "Searching '{}' collection for: '{}'",
+            self.collection_name, query.query_text
+        );
+
+        let query_vector = self.get_single_embedding(&query.query_text).await?;
+
+        let search_url = format!("{}/points/search", self.collection_url());
+        let search_body = serde_json::json!({
+            "vector": query_vector,
+            "limit": query.limit,
+            "with_payload": true,
+            "params": {
+                "hnsw_ef": 128,
+                "exact": false
+            }
+        });
+
+        let response = self.client.post(&search_url).json(&search_body).send().await?;
+
+        if !response.status().is_success() {
+            let err = response.text().await.unwrap_or_default();
+            return Err(GraphonError::Internal(format!(
+                "Qdrant search error: {}",
+                err
+            )));
+        }
+
+        let res: QdrantSearchResponse = response.json().await?;
+
+        let results: Vec<SearchResult> = res
+            .result
+            .into_iter()
+            .filter_map(|sp| {
+                let payload = sp.payload?;
+                let score = sp.score?;
+                let email_id = payload.get("email_id")?.as_str()?.to_string();
+                let subject = payload.get("subject")?.as_str()?.to_string();
+                let sender = payload.get("sender")?.as_str()?.to_string();
+                let chunk_index = payload.get("chunk_index")?.as_u64()? as usize;
+                let content = payload.get("content")?.as_str()?.to_string();
+                Some(SearchResult {
+                    email_id,
+                    subject,
+                    sender,
+                    chunk_index,
+                    content,
+                    score,
+                })
+            })
+            .collect();
+
+        info!("Found {} results from Qdrant search.", results.len());
+        Ok(results)
     }
 }
 

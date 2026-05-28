@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
-use tracing::{error, info, Level};
+use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use graphon_application::{MailSortingPipeline, RagIndexer};
@@ -41,6 +41,10 @@ struct ServerMetrics {
     sync_errors_total: AtomicU64,
     rag_index_requests_total: AtomicU64,
     rag_index_errors_total: AtomicU64,
+    rag_reindex_requests_total: AtomicU64,
+    rag_reindex_errors_total: AtomicU64,
+    rag_search_requests_total: AtomicU64,
+    rag_search_errors_total: AtomicU64,
 }
 
 impl ServerMetrics {
@@ -50,6 +54,10 @@ impl ServerMetrics {
             sync_errors_total: AtomicU64::new(0),
             rag_index_requests_total: AtomicU64::new(0),
             rag_index_errors_total: AtomicU64::new(0),
+            rag_reindex_requests_total: AtomicU64::new(0),
+            rag_reindex_errors_total: AtomicU64::new(0),
+            rag_search_requests_total: AtomicU64::new(0),
+            rag_search_errors_total: AtomicU64::new(0),
         }
     }
 }
@@ -86,15 +94,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let google_client_id = std::env::var("GOOGLE_CLIENT_ID").ok();
     let google_client_secret = std::env::var("GOOGLE_CLIENT_SECRET").ok();
     let qdrant_url = std::env::var("QDRANT_URL").ok();
+    let qdrant_collection = std::env::var("QDRANT_COLLECTION").ok();
+    let qdrant_vector_size = std::env::var("QDRANT_VECTOR_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
 
     // Initialize adapters
     let gmail_client_adapter = Arc::new(GmailClient::new(gmail_token));
     let gmail_client = gmail_client_adapter.clone() as Arc<dyn GmailPort>;
     let classifier = Arc::new(ClassifierAdapter::new(llm_key.clone()));
     let storage = Arc::new(DatabaseAdapter::new(database_url.as_deref()).await?);
-    let qdrant_adapter = Arc::new(QdrantAdapter::new(qdrant_url, llm_key));
+    let qdrant_adapter = Arc::new(QdrantAdapter::new(
+        qdrant_url,
+        qdrant_collection,
+        qdrant_vector_size,
+        llm_key,
+    ));
     let vector_store = qdrant_adapter.clone() as Arc<dyn VectorStorePort>;
     let rag_indexer = Arc::new(RagIndexer::new(storage.clone(), vector_store));
+
+    // Ensure Qdrant collection exists at startup
+    info!(
+        "Ensuring Qdrant collection '{}' exists...",
+        qdrant_adapter.collection_name()
+    );
+    if let Err(e) = qdrant_adapter.create_collection().await {
+        warn!("Failed to create Qdrant collection at startup: {:?}", e);
+    }
     let metrics = Arc::new(ServerMetrics::new());
 
     let app_state = Arc::new(AppState {
@@ -130,6 +156,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .route("/metrics", get(metrics_handler))
             .route("/sync", post(sync_handler))
             .route("/rag/index/:id", post(rag_index_handler))
+            .route("/rag/reindex", post(rag_reindex_handler))
+            .route("/rag/search", post(rag_search_handler))
             .layer(TraceLayer::new_for_http())
             .layer(Extension(app_state));
 
@@ -161,6 +189,22 @@ async fn metrics_handler(Extension(state): Extension<Arc<AppState>>) -> impl Int
         .rag_index_requests_total
         .load(Ordering::Relaxed);
     let rag_errors = state.metrics.rag_index_errors_total.load(Ordering::Relaxed);
+    let reindex_total = state
+        .metrics
+        .rag_reindex_requests_total
+        .load(Ordering::Relaxed);
+    let reindex_errors = state
+        .metrics
+        .rag_reindex_errors_total
+        .load(Ordering::Relaxed);
+    let search_total = state
+        .metrics
+        .rag_search_requests_total
+        .load(Ordering::Relaxed);
+    let search_errors = state
+        .metrics
+        .rag_search_errors_total
+        .load(Ordering::Relaxed);
 
     let body = format!(
         "# HELP graphon_sync_requests_total Total number of mail sync requests\n\
@@ -174,8 +218,21 @@ async fn metrics_handler(Extension(state): Extension<Arc<AppState>>) -> impl Int
          graphon_rag_index_requests_total {}\n\
          # HELP graphon_rag_index_errors_total Total number of failed RAG indexing requests\n\
          # TYPE graphon_rag_index_errors_total counter\n\
-         graphon_rag_index_errors_total {}\n",
-        sync_total, sync_errors, rag_total, rag_errors
+         graphon_rag_index_errors_total {}\n\
+         # HELP graphon_rag_reindex_requests_total Total number of RAG reindex requests\n\
+         # TYPE graphon_rag_reindex_requests_total counter\n\
+         graphon_rag_reindex_requests_total {}\n\
+         # HELP graphon_rag_reindex_errors_total Total number of failed RAG reindex requests\n\
+         # TYPE graphon_rag_reindex_errors_total counter\n\
+         graphon_rag_reindex_errors_total {}\n\
+         # HELP graphon_rag_search_requests_total Total number of RAG search requests\n\
+         # TYPE graphon_rag_search_requests_total counter\n\
+         graphon_rag_search_requests_total {}\n\
+         # HELP graphon_rag_search_errors_total Total number of failed RAG search requests\n\
+         # TYPE graphon_rag_search_errors_total counter\n\
+         graphon_rag_search_errors_total {}\n",
+        sync_total, sync_errors, rag_total, rag_errors,
+        reindex_total, reindex_errors, search_total, search_errors
     );
 
     (
@@ -246,6 +303,75 @@ async fn rag_index_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(
                     serde_json::json!({ "status": "error", "message": "Failed to index email for RAG." }),
+                ),
+            ))
+        }
+    }
+}
+
+async fn rag_reindex_handler(
+    Extension(state): Extension<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    state
+        .metrics
+        .rag_reindex_requests_total
+        .fetch_add(1, Ordering::Relaxed);
+    match state.rag_indexer.reindex_all(500).await {
+        Ok(total_chunks) => Ok(Json(serde_json::json!({
+            "status": "success",
+            "chunks_count": total_chunks
+        }))),
+        Err(err) => {
+            state
+                .metrics
+                .rag_reindex_errors_total
+                .fetch_add(1, Ordering::Relaxed);
+            error!("RAG Reindex error: {:?}", err);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::json!({ "status": "error", "message": "Failed to reindex emails for RAG." }),
+                ),
+            ))
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SearchInput {
+    query: String,
+    #[serde(default = "default_limit")]
+    limit: u64,
+}
+
+fn default_limit() -> u64 {
+    10
+}
+
+async fn rag_search_handler(
+    Extension(state): Extension<Arc<AppState>>,
+    Json(input): Json<SearchInput>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    state
+        .metrics
+        .rag_search_requests_total
+        .fetch_add(1, Ordering::Relaxed);
+    match state.rag_indexer.search(&input.query, input.limit).await {
+        Ok(results) => Ok(Json(serde_json::json!({
+            "status": "success",
+            "query": input.query,
+            "results": results
+        }))),
+        Err(err) => {
+            state
+                .metrics
+                .rag_search_errors_total
+                .fetch_add(1, Ordering::Relaxed);
+            error!("RAG Search error: {:?}", err);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::json!({ "status": "error", "message": "Failed to search RAG index." }),
                 ),
             ))
         }

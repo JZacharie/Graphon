@@ -1,4 +1,4 @@
-use graphon_core::entities::RagChunk;
+use graphon_core::entities::{RagChunk, SearchQuery, SearchResult};
 use graphon_core::error::GraphonError;
 use graphon_core::ports::{StoragePort, VectorStorePort};
 use std::sync::Arc;
@@ -17,26 +17,12 @@ impl RagIndexer {
         }
     }
 
-    pub async fn index_email_for_rag(&self, email_id: &str) -> Result<Vec<RagChunk>, GraphonError> {
-        info!("Indexing email {} for RAG pipeline...", email_id);
-
-        let email_opt = self.storage.get_email(email_id).await?;
-        let email = match email_opt {
-            Some(e) => e,
-            None => {
-                return Err(GraphonError::NotFound(format!(
-                    "Email with ID {}",
-                    email_id
-                )))
-            }
-        };
-
+    fn chunk_email(&self, email: &graphon_core::entities::Email) -> Vec<RagChunk> {
         let content_to_chunk = format!(
             "From: {}\nSubject: {}\nDate: {}\n\n{}",
             email.from, email.subject, email.date, email.body
         );
 
-        // Simple chunking strategy (e.g., character-based chunking with overlap)
         let chunk_size = 1000;
         let overlap = 200;
         let mut chunks = Vec::new();
@@ -61,6 +47,24 @@ impl RagIndexer {
             start += chunk_size - overlap;
         }
 
+        chunks
+    }
+
+    pub async fn index_email_for_rag(&self, email_id: &str) -> Result<Vec<RagChunk>, GraphonError> {
+        info!("Indexing email {} for RAG pipeline...", email_id);
+
+        let email_opt = self.storage.get_email(email_id).await?;
+        let email = match email_opt {
+            Some(e) => e,
+            None => {
+                return Err(GraphonError::NotFound(format!(
+                    "Email with ID {}",
+                    email_id
+                )))
+            }
+        };
+
+        let chunks = self.chunk_email(&email);
         info!(
             "Created {} RAG chunks for email ID {}",
             chunks.len(),
@@ -68,5 +72,41 @@ impl RagIndexer {
         );
         self.vector_store.index_chunks(&chunks).await?;
         Ok(chunks)
+    }
+
+    pub async fn reindex_all(&self, batch_size: usize) -> Result<usize, GraphonError> {
+        info!("Reindexing all emails for RAG pipeline...");
+
+        let emails = self.storage.get_recent_emails(batch_size).await?;
+        let mut total_chunks = 0;
+
+        for email in &emails {
+            info!("Indexing email ID {}: {}", email.id, email.subject);
+            let chunks = self.chunk_email(email);
+            if !chunks.is_empty() {
+                self.vector_store.index_chunks(&chunks).await?;
+                total_chunks += chunks.len();
+            }
+        }
+
+        info!(
+            "Reindexing complete: {} emails processed, {} chunks indexed.",
+            emails.len(),
+            total_chunks
+        );
+        Ok(total_chunks)
+    }
+
+    pub async fn search(
+        &self,
+        query_text: &str,
+        limit: u64,
+    ) -> Result<Vec<SearchResult>, GraphonError> {
+        info!("Searching RAG index for: '{}'", query_text);
+        let query = SearchQuery {
+            query_text: query_text.to_string(),
+            limit,
+        };
+        self.vector_store.search(&query).await
     }
 }
