@@ -1,10 +1,12 @@
 use axum::{
     http::StatusCode,
+    response::IntoResponse,
     routing::{get, post},
     Extension, Json, Router,
 };
 use clap::Parser;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, Level};
@@ -30,11 +32,30 @@ struct Args {
     clean: bool,
 }
 
+struct ServerMetrics {
+    sync_requests_total: AtomicU64,
+    sync_errors_total: AtomicU64,
+    rag_index_requests_total: AtomicU64,
+    rag_index_errors_total: AtomicU64,
+}
+
+impl ServerMetrics {
+    fn new() -> Self {
+        Self {
+            sync_requests_total: AtomicU64::new(0),
+            sync_errors_total: AtomicU64::new(0),
+            rag_index_requests_total: AtomicU64::new(0),
+            rag_index_errors_total: AtomicU64::new(0),
+        }
+    }
+}
+
 struct AppState {
     gmail_client: Arc<dyn GmailPort>,
     classifier: Arc<dyn ClassifierPort>,
     storage: Arc<dyn StoragePort>,
     rag_indexer: Arc<RagIndexer>,
+    metrics: Arc<ServerMetrics>,
 }
 
 #[tokio::main]
@@ -57,12 +78,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let classifier = Arc::new(ClassifierAdapter::new(llm_key));
     let storage = Arc::new(DatabaseAdapter::new(database_url.as_deref()).await?);
     let rag_indexer = Arc::new(RagIndexer::new(storage.clone()));
+    let metrics = Arc::new(ServerMetrics::new());
 
     let app_state = Arc::new(AppState {
         gmail_client: gmail_client.clone(),
         classifier: classifier.clone(),
         storage: storage.clone(),
         rag_indexer,
+        metrics,
     });
 
     if args.sync || args.clean {
@@ -80,6 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Build router
         let app = Router::new()
             .route("/health", get(health_handler))
+            .route("/metrics", get(metrics_handler))
             .route("/sync", post(sync_handler))
             .route("/rag/index/:id", post(rag_index_handler))
             .layer(TraceLayer::new_for_http())
@@ -105,9 +129,47 @@ async fn health_handler() -> (StatusCode, &'static str) {
     (StatusCode::OK, "OK")
 }
 
+async fn metrics_handler(Extension(state): Extension<Arc<AppState>>) -> impl IntoResponse {
+    let sync_total = state.metrics.sync_requests_total.load(Ordering::Relaxed);
+    let sync_errors = state.metrics.sync_errors_total.load(Ordering::Relaxed);
+    let rag_total = state
+        .metrics
+        .rag_index_requests_total
+        .load(Ordering::Relaxed);
+    let rag_errors = state.metrics.rag_index_errors_total.load(Ordering::Relaxed);
+
+    let body = format!(
+        "# HELP graphon_sync_requests_total Total number of mail sync requests\n\
+         # TYPE graphon_sync_requests_total counter\n\
+         graphon_sync_requests_total {}\n\
+         # HELP graphon_sync_errors_total Total number of failed mail sync requests\n\
+         # TYPE graphon_sync_errors_total counter\n\
+         graphon_sync_errors_total {}\n\
+         # HELP graphon_rag_index_requests_total Total number of RAG indexing requests\n\
+         # TYPE graphon_rag_index_requests_total counter\n\
+         graphon_rag_index_requests_total {}\n\
+         # HELP graphon_rag_index_errors_total Total number of failed RAG indexing requests\n\
+         # TYPE graphon_rag_index_errors_total counter\n\
+         graphon_rag_index_errors_total {}\n",
+        sync_total, sync_errors, rag_total, rag_errors
+    );
+
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+}
+
 async fn sync_handler(
     Extension(state): Extension<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    state
+        .metrics
+        .sync_requests_total
+        .fetch_add(1, Ordering::Relaxed);
     let pipeline = MailSortingPipeline::new(
         state.gmail_client.clone(),
         state.classifier.clone(),
@@ -119,6 +181,10 @@ async fn sync_handler(
             serde_json::json!({ "status": "success", "message": "Mail sync completed." }),
         )),
         Err(err) => {
+            state
+                .metrics
+                .sync_errors_total
+                .fetch_add(1, Ordering::Relaxed);
             error!("Sync handler error: {:?}", err);
             // Secure response: do not expose underlying database/system errors to user
             Err((
@@ -135,6 +201,10 @@ async fn rag_index_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     Extension(state): Extension<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    state
+        .metrics
+        .rag_index_requests_total
+        .fetch_add(1, Ordering::Relaxed);
     match state.rag_indexer.index_email_for_rag(&id).await {
         Ok(chunks) => Ok(Json(serde_json::json!({
             "status": "success",
@@ -143,6 +213,10 @@ async fn rag_index_handler(
             "chunks": chunks
         }))),
         Err(err) => {
+            state
+                .metrics
+                .rag_index_errors_total
+                .fetch_add(1, Ordering::Relaxed);
             error!("RAG Indexer error: {:?}", err);
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
