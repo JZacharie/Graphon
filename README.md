@@ -22,27 +22,27 @@ Graphon est structuré en plusieurs sous-crates Rust autonomes au sein d'un work
 ```mermaid
 graph TD
     subgraph graphon-server ["graphon-server (CLI / API Axum)"]
-        CLI[Interface CLI & Options]
-        Routes[Routes HTTP & Webhooks]
+        CLI["Interface CLI & Options"]
+        Routes["Routes HTTP & Webhooks"]
     end
 
     subgraph graphon-application ["graphon-application (Cas d'usage)"]
-        PipelineSort[Pipeline de Tri & Filtrage]
-        RAGIndexer[Orchestrateur RAG & Ingestion]
-        GarbageCollector[Gestionnaire de Rétention]
+        PipelineSort["Pipeline de Tri & Filtrage"]
+        RAGIndexer["Orchestrateur RAG & Ingestion"]
+        GarbageCollector["Gestionnaire de Rétention"]
     end
 
     subgraph graphon-core ["graphon-core (Domaine & Ports)"]
-        Entities[Entities: Email, Attachment, Label]
-        Ports[Ports: GmailPort, StoragePort, ClassifierPort]
-        Errors[GraphonResult / Error]
+        Entities["Entities: Email, Attachment, Label"]
+        Ports["Ports: GmailPort, StoragePort, ClassifierPort"]
+        Errors["GraphonResult / Error"]
     end
 
     subgraph graphon-infrastructure ["graphon-infrastructure (Adapters)"]
-        GmailAPI[Adaptateur API Gmail (OAuth2/Google)]
-        PostgresPersist[Persistances SQLx & PostgreSQL]
-        LLMClassifier[Classifieur IA / Mots-clés]
-        RAGExporter[RAG Payload Exporter]
+        GmailAPI["Adaptateur API Gmail (OAuth2/Google)"]
+        PostgresPersist["Persistances SQLx & PostgreSQL"]
+        LLMClassifier["Classifieur IA / Mots-clés"]
+        RAGExporter["RAG Payload Exporter"]
     end
 
     graphon-server --> graphon-application
