@@ -57,9 +57,7 @@ impl ClassifierAdapter {
 
     async fn llm_classify(&self, prompt: &str, email: &Email) -> Result<String, GraphonError> {
         let Some(ref api_key) = self.pylos_api_key else {
-            return Err(GraphonError::Internal(
-                "No Pylos API key configured".into(),
-            ));
+            return Err(GraphonError::Internal("No Pylos API key configured".into()));
         };
 
         let text = format!("Subject: {}\nBody:\n{}", email.subject, email.body);
@@ -81,7 +79,10 @@ impl ClassifierAdapter {
             temperature: 0.0,
         };
 
-        let url = format!("{}/v1/chat/completions", self.pylos_base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/chat/completions",
+            self.pylos_base_url.trim_end_matches('/')
+        );
 
         let resp = self
             .client
@@ -102,10 +103,7 @@ impl ClassifierAdapter {
             )));
         }
 
-        let chat_resp: ChatResponse = resp
-            .json()
-            .await
-            .map_err(|e| GraphonError::Network(e))?;
+        let chat_resp: ChatResponse = resp.json().await.map_err(|e| GraphonError::Network(e))?;
 
         let content = chat_resp
             .choices
@@ -121,7 +119,10 @@ impl ClassifierAdapter {
 #[async_trait]
 impl ClassifierPort for ClassifierAdapter {
     async fn is_spam_or_promo(&self, email: &Email) -> Result<bool, GraphonError> {
-        info!("Checking if email ID {} is spam or promotional...", email.id);
+        info!(
+            "Checking if email ID {} is spam or promotional...",
+            email.id
+        );
 
         // Fast path: keyword check before LLM call
         let text_to_check = format!("{} {}", email.subject, email.body).to_lowercase();
@@ -136,10 +137,7 @@ impl ClassifierPort for ClassifierAdapter {
             "limited time",
             "newsletter",
         ];
-        if promo_keywords
-            .iter()
-            .any(|k| text_to_check.contains(k))
-        {
+        if promo_keywords.iter().any(|k| text_to_check.contains(k)) {
             info!("Keyword match — classified as promo");
             return Ok(true);
         }
@@ -162,7 +160,10 @@ impl ClassifierPort for ClassifierAdapter {
                 Ok(is_promo)
             }
             Err(e) => {
-                warn!("LLM classification failed, falling back to keyword-only: {:?}", e);
+                warn!(
+                    "LLM classification failed, falling back to keyword-only: {:?}",
+                    e
+                );
                 Ok(false)
             }
         }
@@ -174,13 +175,18 @@ impl ClassifierPort for ClassifierAdapter {
         // Fast path: urgent keyword check
         let text_to_check = format!("{} {}", email.subject, email.body).to_lowercase();
         let urgent_keywords = [
-            "urgent", "asap", "action required", "attention", "important",
-            "critical", "meeting", "interview", "invoice", "deadline",
+            "urgent",
+            "asap",
+            "action required",
+            "attention",
+            "important",
+            "critical",
+            "meeting",
+            "interview",
+            "invoice",
+            "deadline",
         ];
-        if urgent_keywords
-            .iter()
-            .any(|k| text_to_check.contains(k))
-        {
+        if urgent_keywords.iter().any(|k| text_to_check.contains(k)) {
             info!("Keyword match — classified as URGENT");
             return Ok("URGENT".to_string());
         }

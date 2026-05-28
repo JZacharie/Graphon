@@ -95,11 +95,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let llm_key = std::env::var("LLM_API_KEY").ok();
     let google_client_id = std::env::var("GOOGLE_CLIENT_ID").ok();
     let google_client_secret = std::env::var("GOOGLE_CLIENT_SECRET").ok();
-    let pylos_base_url = std::env::var("PYLOS_BASE_URL")
-        .unwrap_or_else(|_| "http://localhost:3000".into());
+    let pylos_base_url =
+        std::env::var("PYLOS_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".into());
     let pylos_api_key = std::env::var("PYLOS_API_KEY").ok();
-    let pylos_model = std::env::var("PYLOS_MODEL")
-        .unwrap_or_else(|_| "deepseek-v4-flash".into());
+    let pylos_model = std::env::var("PYLOS_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".into());
     let qdrant_url = std::env::var("QDRANT_URL").ok();
     let qdrant_collection = std::env::var("QDRANT_COLLECTION").ok();
     let qdrant_vector_size = std::env::var("QDRANT_VECTOR_SIZE")
