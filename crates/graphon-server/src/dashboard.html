@@ -303,6 +303,62 @@
             border-left: 4px solid var(--danger);
         }
 
+        .category-card {
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 12px;
+            padding: 1rem 1.25rem;
+            margin-bottom: 0.75rem;
+            border: 1px solid var(--border-color);
+        }
+
+        .category-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+        }
+
+        .category-name {
+            font-weight: 600;
+            font-size: 0.95rem;
+        }
+
+        .category-action {
+            font-size: 0.75rem;
+            padding: 0.2rem 0.6rem;
+            border-radius: 4px;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+
+        .action-keep { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+        .action-delete { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+        .action-consolidate { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
+        .action-review { background: rgba(96, 165, 250, 0.15); color: #60a5fa; }
+
+        .label-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.3rem;
+            margin-top: 0.5rem;
+        }
+
+        .label-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--text-secondary);
+        }
+
+        .label-pill .count {
+            color: var(--text-primary);
+            font-weight: 500;
+        }
+
         .loading-dots:after {
             content: '.';
             animation: dots 1.5s steps(5, end) infinite;
@@ -360,6 +416,20 @@
                 <div class="stat-footer" style="color: var(--text-secondary);">
                     <span>Dernier run stable</span>
                 </div>
+            </div>
+        </div>
+
+        <!-- Labels Section -->
+        <div class="section-card">
+            <div class="section-header">
+                <h2 class="section-title">Étiquettes Gmail</h2>
+                <div class="header-actions">
+                    <button class="btn-action" onclick="loadLabelCategories()">Analyser</button>
+                    <button class="btn-action" onclick="cleanupEmptyLabels()">Nettoyer vides</button>
+                </div>
+            </div>
+            <div id="labelsContainer">
+                <p style="color: var(--text-secondary);">Cliquez sur "Analyser" pour voir les étiquettes.</p>
             </div>
         </div>
 
@@ -534,6 +604,58 @@
             } finally {
                 btn.disabled = false;
                 btn.textContent = originalText;
+            }
+        }
+
+        // Load and display Gmail label categories
+        async function loadLabelCategories() {
+            const container = document.getElementById('labelsContainer');
+            container.innerHTML = '<p style="color: var(--text-secondary);">Analyse en cours...</p>';
+            try {
+                const response = await fetch('/api/labels');
+                if (!response.ok) throw new Error('Impossible de charger les étiquettes');
+                const data = await response.json();
+                const categories = data.categories || [];
+                if (categories.length === 0) {
+                    container.innerHTML = '<p style="color: var(--text-secondary);">Aucune étiquette trouvée.</p>';
+                    return;
+                }
+                container.innerHTML = '';
+                categories.forEach(cat => {
+                    const card = document.createElement('div');
+                    card.className = 'category-card';
+                    card.innerHTML = `
+                        <div class="category-header">
+                            <span class="category-name">${cat.name}</span>
+                            <span class="category-action action-${cat.action}">${cat.action}</span>
+                        </div>
+                        <p style="color: var(--text-secondary); font-size: 0.85rem; margin-top: 0.25rem;">${cat.description}</p>
+                        <div class="label-tags">
+                            ${cat.labels.map(l => `
+                                <span class="label-pill">
+                                    ${l.name} <span class="count">(${l.messages_total || 0})</span>
+                                </span>
+                            `).join('')}
+                        </div>
+                    `;
+                    container.appendChild(card);
+                });
+            } catch (err) {
+                container.innerHTML = `<p style="color: var(--danger);">Erreur : ${err.message}</p>`;
+            }
+        }
+
+        // Delete all empty labels
+        async function cleanupEmptyLabels() {
+            if (!confirm('Supprimer toutes les étiquettes vides ?')) return;
+            try {
+                const response = await fetch('/api/labels/cleanup', { method: 'POST' });
+                if (!response.ok) throw new Error('Nettoyage échoué');
+                const data = await response.json();
+                showToast(`${data.deleted} étiquettes vides supprimées`, data.deleted > 0 ? 'success' : 'success');
+                await loadLabelCategories();
+            } catch (err) {
+                showToast(err.message, 'error');
             }
         }
 

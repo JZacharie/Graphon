@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use graphon_core::entities::{Attachment, Email};
+use graphon_core::entities::{Attachment, Email, LabelInfo};
 use graphon_core::error::GraphonError;
 use graphon_core::ports::GmailPort;
 use serde::Deserialize;
@@ -564,6 +564,67 @@ impl GmailPort for GmailClient {
             return Err(GraphonError::Gmail(format!(
                 "Failed to remove labels: {}",
                 err_body
+            )));
+        }
+        Ok(())
+    }
+
+    async fn get_all_labels(&self) -> Result<Vec<LabelInfo>, GraphonError> {
+        let token = match read_token(&self.token) {
+            Some(t) => t,
+            None => return Err(GraphonError::Gmail("No OAuth token provided".to_string())),
+        };
+        let url = format!("{}/users/me/labels", self._api_url);
+        let response = self.client.get(&url).bearer_auth(token).send().await?;
+        if !response.status().is_success() {
+            let err = response.text().await.unwrap_or_default();
+            return Err(GraphonError::Gmail(format!(
+                "Failed to list labels: {}",
+                err
+            )));
+        }
+        #[derive(Deserialize)]
+        struct LabelListResponse {
+            labels: Option<Vec<LabelData>>,
+        }
+        #[derive(Deserialize)]
+        struct LabelData {
+            id: String,
+            name: String,
+            #[serde(rename = "type")]
+            label_type: String,
+            messages_total: Option<i64>,
+            messages_unread: Option<i64>,
+            threads_total: Option<i64>,
+        }
+        let res: LabelListResponse = response.json().await?;
+        Ok(res
+            .labels
+            .unwrap_or_default()
+            .into_iter()
+            .map(|l| LabelInfo {
+                id: l.id,
+                name: l.name,
+                label_type: l.label_type,
+                messages_total: l.messages_total,
+                messages_unread: l.messages_unread,
+                threads_total: l.threads_total,
+            })
+            .collect())
+    }
+
+    async fn delete_label(&self, label_id: &str) -> Result<(), GraphonError> {
+        let token = match read_token(&self.token) {
+            Some(t) => t,
+            None => return Err(GraphonError::Gmail("No OAuth token provided".to_string())),
+        };
+        let url = format!("{}/users/me/labels/{}", self._api_url, label_id);
+        let response = self.client.delete(&url).bearer_auth(token).send().await?;
+        if !response.status().is_success() && response.status() != 404 {
+            let err = response.text().await.unwrap_or_default();
+            return Err(GraphonError::Gmail(format!(
+                "Failed to delete label: {}",
+                err
             )));
         }
         Ok(())

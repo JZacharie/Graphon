@@ -13,7 +13,7 @@ use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use graphon_application::{MailSortingPipeline, RagIndexer};
+use graphon_application::{LabelOrganizer, MailSortingPipeline, RagIndexer};
 use graphon_core::ports::{ClassifierPort, GmailPort, StoragePort, VectorStorePort};
 use graphon_infrastructure::{ClassifierAdapter, DatabaseAdapter, GmailClient, QdrantAdapter};
 
@@ -69,6 +69,7 @@ struct AppState {
     classifier: Arc<dyn ClassifierPort>,
     storage: Arc<dyn StoragePort>,
     rag_indexer: Arc<RagIndexer>,
+    label_organizer: Arc<LabelOrganizer>,
     metrics: Arc<ServerMetrics>,
     google_client_id: Option<String>,
     google_client_secret: Option<String>,
@@ -124,12 +125,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let metrics = Arc::new(ServerMetrics::new());
 
+    let label_organizer = Arc::new(LabelOrganizer::new(gmail_client.clone()));
     let app_state = Arc::new(AppState {
         gmail_client: gmail_client.clone(),
         gmail_client_adapter,
         classifier: classifier.clone(),
         storage: storage.clone(),
         rag_indexer,
+        label_organizer,
         metrics,
         google_client_id,
         google_client_secret,
@@ -159,6 +162,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .route("/rag/index/:id", post(rag_index_handler))
             .route("/rag/reindex", post(rag_reindex_handler))
             .route("/rag/search", post(rag_search_handler))
+            .route("/api/labels", get(api_labels_handler))
+            .route("/api/labels/cleanup", post(api_labels_cleanup_handler))
+            .route(
+                "/api/labels/consolidate/:prefix/:target",
+                post(api_labels_consolidate_handler),
+            )
             .layer(TraceLayer::new_for_http())
             .layer(Extension(app_state));
 
@@ -567,7 +576,73 @@ async fn api_emails_handler(Extension(state): Extension<Arc<AppState>>) -> impl 
         Ok(emails) => Json(serde_json::json!(emails)).into_response(),
         Err(err) => {
             error!("Failed to list emails: {:?}", err);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to load emails").into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "message": format!("Failed to load emails: {}", err)
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn api_labels_handler(
+    Extension(state): Extension<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    match state.label_organizer.analyze_labels().await {
+        Ok(categories) => Ok(Json(serde_json::json!({
+            "status": "success",
+            "categories": categories
+        }))),
+        Err(err) => {
+            error!("Label analysis error: {:?}", err);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "status": "error", "message": format!("{}", err) })),
+            ))
+        }
+    }
+}
+
+async fn api_labels_cleanup_handler(
+    Extension(state): Extension<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    match state.label_organizer.cleanup_empty_labels().await {
+        Ok(deleted) => Ok(Json(serde_json::json!({
+            "status": "success",
+            "deleted": deleted
+        }))),
+        Err(err) => {
+            error!("Label cleanup error: {:?}", err);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "status": "error", "message": format!("{}", err) })),
+            ))
+        }
+    }
+}
+
+async fn api_labels_consolidate_handler(
+    axum::extract::Path((prefix, target)): axum::extract::Path<(String, String)>,
+    Extension(state): Extension<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    match state
+        .label_organizer
+        .consolidate_labels(&prefix, &target)
+        .await
+    {
+        Ok(consolidated) => Ok(Json(serde_json::json!({
+            "status": "success",
+            "consolidated": consolidated
+        }))),
+        Err(err) => {
+            error!("Label consolidation error: {:?}", err);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "status": "error", "message": format!("{}", err) })),
+            ))
         }
     }
 }

@@ -1,4 +1,4 @@
-use crate::entities::{Email, RetentionRule};
+use crate::entities::{Email, LabelInfo, RetentionRule};
 use crate::error::GraphonError;
 use async_trait::async_trait;
 
@@ -10,6 +10,8 @@ pub trait GmailPort: Send + Sync {
     async fn apply_labels(&self, email_id: &str, labels: &[String]) -> Result<(), GraphonError>;
     async fn remove_labels(&self, email_id: &str, labels: &[String]) -> Result<(), GraphonError>;
     async fn trash_email(&self, email_id: &str) -> Result<(), GraphonError>;
+    async fn get_all_labels(&self) -> Result<Vec<LabelInfo>, GraphonError>;
+    async fn delete_label(&self, label_id: &str) -> Result<(), GraphonError>;
 }
 
 #[async_trait]

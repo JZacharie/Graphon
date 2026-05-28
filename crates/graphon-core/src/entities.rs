@@ -54,3 +54,47 @@ pub struct SearchQuery {
     pub query_text: String,
     pub limit: u64,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LabelInfo {
+    pub id: String,
+    pub name: String,
+    pub label_type: String,
+    pub messages_total: Option<i64>,
+    pub messages_unread: Option<i64>,
+    pub threads_total: Option<i64>,
+}
+
+impl LabelInfo {
+    pub fn is_system(&self) -> bool {
+        matches!(
+            self.name.as_str(),
+            "INBOX"
+                | "SPAM"
+                | "TRASH"
+                | "UNREAD"
+                | "STARRED"
+                | "IMPORTANT"
+                | "DRAFT"
+                | "SENT"
+                | "CHAT"
+                | "CATEGORY_PERSONAL"
+                | "CATEGORY_SOCIAL"
+                | "CATEGORY_PROMOTIONS"
+                | "CATEGORY_UPDATES"
+                | "CATEGORY_FORUMS"
+        )
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.messages_total.unwrap_or(0) == 0
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LabelCategory {
+    pub name: String,
+    pub labels: Vec<LabelInfo>,
+    pub description: String,
+    pub action: String,
+}
