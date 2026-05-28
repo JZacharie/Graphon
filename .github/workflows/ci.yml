@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Lint with clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Run tests
+        run: cargo test --verbose
+
+  build-and-push:
+    name: Build & Push (${{ matrix.arch }})
+    needs: [check]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          push: true
+          tags: |
+            ghcr.io/jzacharie/graphon:latest-${{ matrix.arch }}
+            ghcr.io/jzacharie/graphon:${{ github.sha }}-${{ matrix.arch }}
+          cache-from: type=registry,ref=ghcr.io/jzacharie/graphon-cache:${{ matrix.arch }}
+          cache-to: type=registry,ref=ghcr.io/jzacharie/graphon-cache:${{ matrix.arch }},mode=max
+
+  merge-manifest:
+    name: Merge Multi-Arch Manifests
+    needs: [build-and-push]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create and push manifest
+        run: |
+          docker buildx imagetools create -t ghcr.io/jzacharie/graphon:latest \
+            ghcr.io/jzacharie/graphon:latest-amd64 \
+            ghcr.io/jzacharie/graphon:latest-arm64
+          docker buildx imagetools create -t ghcr.io/jzacharie/graphon:${{ github.sha }} \
+            ghcr.io/jzacharie/graphon:${{ github.sha }}-amd64 \
+            ghcr.io/jzacharie/graphon:${{ github.sha }}-arm64
+
+  deploy:
+    name: Deploy
+    needs: [merge-manifest]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout GitOps repo (jo3)
+        uses: actions/checkout@v4
+        with:
+          repository: JZacharie/jo3
+          token: ${{ secrets.GH_PAT }}
+          path: jo3
+
+      - name: Update production image tags
+        run: |
+          SHA="${{ github.sha }}"
+          sed -i "s|tag: \"latest\"|tag: \"$SHA\"|" jo3/values/ai/graphon/values.yaml
+          cd jo3
+          git add values/ai/graphon/values.yaml
+          git -c user.name="Graphon CI" -c user.email="ci@graphon.org" commit -m "chore(ai/graphon): deploy production ${{ github.sha }}"
+          git push
