@@ -2,7 +2,7 @@ use chrono::Utc;
 use graphon_core::error::GraphonError;
 use graphon_core::ports::{ClassifierPort, GmailPort, StoragePort};
 use std::sync::Arc;
-use tracing::info;
+use tracing::{debug, info};
 
 pub struct MailSortingPipeline {
     gmail_client: Arc<dyn GmailPort>,
@@ -37,7 +37,12 @@ impl MailSortingPipeline {
             );
 
             // Step 1: Nettoyage / Détection pub & spams
-            if self.classifier.is_spam_or_promo(&email).await? {
+            let is_spam_or_promo = self.classifier.is_spam_or_promo(&email).await?;
+            debug!(
+                "Email ID {} - is_spam_or_promo: {}",
+                email.id, is_spam_or_promo
+            );
+            if is_spam_or_promo {
                 info!("Email classified as spam or promo. Moving to PROMO.");
                 self.gmail_client
                     .apply_labels(&email.id, &["PROMO".to_string()])
@@ -50,6 +55,10 @@ impl MailSortingPipeline {
 
             // Step 2: Classification d'importance
             let label = self.classifier.classify_importance(&email).await?;
+            debug!(
+                "Email ID {} - importance classification: {}",
+                email.id, label
+            );
             info!("Email importance classification: {}", label);
             self.gmail_client.apply_labels(&email.id, &[label]).await?;
             self.gmail_client

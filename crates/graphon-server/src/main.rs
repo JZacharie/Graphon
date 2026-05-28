@@ -30,6 +30,10 @@ struct Args {
     /// Clean retention rules (run automatically in sync)
     #[arg(long)]
     clean: bool,
+
+    /// Enable verbose/debug logs
+    #[arg(long)]
+    debug: bool,
 }
 
 struct ServerMetrics {
@@ -63,13 +67,17 @@ struct AppState {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Setup logger
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)?;
-
     let args = Args::parse();
+
+    let is_debug = args.debug
+        || std::env::var("DEBUG")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+    let log_level = if is_debug { Level::DEBUG } else { Level::INFO };
+
+    // Setup logger
+    let subscriber = FmtSubscriber::builder().with_max_level(log_level).finish();
+    tracing::subscriber::set_global_default(subscriber)?;
 
     // Load environment variables / configurations
     let database_url = std::env::var("DATABASE_URL").ok();

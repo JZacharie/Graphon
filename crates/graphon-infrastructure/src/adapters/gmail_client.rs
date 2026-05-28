@@ -4,7 +4,7 @@ use graphon_core::entities::{Attachment, Email};
 use graphon_core::error::GraphonError;
 use graphon_core::ports::GmailPort;
 use serde::Deserialize;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 fn encode_query(s: &str) -> String {
     s.chars()
@@ -22,6 +22,17 @@ pub struct GmailClient {
     client: reqwest::Client,
     _api_url: String,
     token: RwLock<Option<String>>,
+}
+
+#[derive(Deserialize, Debug)]
+struct Label {
+    id: String,
+    name: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct LabelsListResponse {
+    labels: Option<Vec<Label>>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -258,35 +269,70 @@ impl GmailClient {
         }
     }
 
-    async fn create_label(&self, token: &str, label: &str) -> Result<(), GraphonError> {
-        info!("Attempting to create label: {}", label);
-        let url = format!("{}/users/me/labels", self._api_url);
+    async fn get_or_create_label_id(
+        &self,
+        token: &str,
+        name: &str,
+    ) -> Result<String, GraphonError> {
+        let list_url = format!("{}/users/me/labels", self._api_url);
+        let response = self.client.get(&list_url).bearer_auth(token).send().await?;
+        if response.status().is_success() {
+            let list: LabelsListResponse = response.json().await?;
+            if let Some(labels) = list.labels {
+                for label in labels {
+                    if label.name.eq_ignore_ascii_case(name) || label.id.eq_ignore_ascii_case(name)
+                    {
+                        debug!(
+                            "Resolved label name '{}' to existing ID '{}'",
+                            name, label.id
+                        );
+                        return Ok(label.id);
+                    }
+                }
+            }
+        }
+
+        if is_system_label(name) {
+            return Ok(name.to_string());
+        }
+
+        info!("Label '{}' not found. Creating it...", name);
+        let create_url = format!("{}/users/me/labels", self._api_url);
         let body = serde_json::json!({
-            "name": label,
+            "name": name,
             "labelListVisibility": "labelShow",
             "messageListVisibility": "show"
         });
-
-        let response = self
+        let create_response = self
             .client
-            .post(&url)
+            .post(&create_url)
             .bearer_auth(token)
             .json(&body)
             .send()
             .await?;
 
-        if response.status().is_success() || response.status() == reqwest::StatusCode::CONFLICT {
-            Ok(())
+        if create_response.status().is_success() {
+            let new_label: Label = create_response.json().await?;
+            Ok(new_label.id)
         } else {
-            let err_body = response.text().await.unwrap_or_default();
+            let err_body = create_response.text().await.unwrap_or_default();
             if err_body.contains("alreadyExists") || err_body.contains("Label name exists") {
-                Ok(())
-            } else {
-                Err(GraphonError::Gmail(format!(
-                    "Failed to create label {}: {}",
-                    label, err_body
-                )))
+                let response = self.client.get(&list_url).bearer_auth(token).send().await?;
+                if response.status().is_success() {
+                    let list: LabelsListResponse = response.json().await?;
+                    if let Some(labels) = list.labels {
+                        for label in labels {
+                            if label.name.eq_ignore_ascii_case(name) {
+                                return Ok(label.id);
+                            }
+                        }
+                    }
+                }
             }
+            Err(GraphonError::Gmail(format!(
+                "Failed to create or retrieve label ID for '{}': {}",
+                name, err_body
+            )))
         }
     }
 }
@@ -434,48 +480,34 @@ impl GmailPort for GmailClient {
             let token_guard = self.token.read().unwrap();
             token_guard.as_ref().cloned().unwrap()
         };
-        let url = format!("{}/users/me/messages/{}/modify", self._api_url, email_id);
 
+        // Resolve label names to IDs
+        let mut label_ids = Vec::new();
+        for label in labels {
+            match self.get_or_create_label_id(&token, label).await {
+                Ok(id) => label_ids.push(id),
+                Err(e) => {
+                    warn!("Could not resolve label ID for '{}': {:?}", label, e);
+                    label_ids.push(label.clone());
+                }
+            }
+        }
+
+        let url = format!("{}/users/me/messages/{}/modify", self._api_url, email_id);
         let body = serde_json::json!({
-            "addLabelIds": labels
+            "addLabelIds": label_ids
         });
 
         let response = self
             .client
             .post(&url)
-            .bearer_auth(&token)
+            .bearer_auth(token)
             .json(&body)
             .send()
             .await?;
 
         if !response.status().is_success() {
             let err_body = response.text().await.unwrap_or_default();
-            if err_body.contains("Invalid label") {
-                info!("Invalid label detected. Attempting to create missing custom labels...");
-                for label in labels {
-                    if !is_system_label(label) {
-                        if let Err(e) = self.create_label(&token, label).await {
-                            warn!("Failed to create custom label {}: {:?}", label, e);
-                        }
-                    }
-                }
-                // Retry modifying after attempting to create labels
-                let retry_response = self
-                    .client
-                    .post(&url)
-                    .bearer_auth(&token)
-                    .json(&body)
-                    .send()
-                    .await?;
-                if retry_response.status().is_success() {
-                    return Ok(());
-                }
-                let retry_err_body = retry_response.text().await.unwrap_or_default();
-                return Err(GraphonError::Gmail(format!(
-                    "Failed to apply labels after retry: {}",
-                    retry_err_body
-                )));
-            }
             return Err(GraphonError::Gmail(format!(
                 "Failed to apply labels: {}",
                 err_body
@@ -493,10 +525,22 @@ impl GmailPort for GmailClient {
             let token_guard = self.token.read().unwrap();
             token_guard.as_ref().cloned().unwrap()
         };
-        let url = format!("{}/users/me/messages/{}/modify", self._api_url, email_id);
 
+        // Resolve label names to IDs
+        let mut label_ids = Vec::new();
+        for label in labels {
+            match self.get_or_create_label_id(&token, label).await {
+                Ok(id) => label_ids.push(id),
+                Err(e) => {
+                    warn!("Could not resolve label ID for '{}': {:?}", label, e);
+                    label_ids.push(label.clone());
+                }
+            }
+        }
+
+        let url = format!("{}/users/me/messages/{}/modify", self._api_url, email_id);
         let body = serde_json::json!({
-            "removeLabelIds": labels
+            "removeLabelIds": label_ids
         });
 
         let response = self
