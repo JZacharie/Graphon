@@ -91,7 +91,7 @@ impl ClassifierAdapter {
             .json(&payload)
             .send()
             .await
-            .map_err(|e| GraphonError::Network(e))?;
+            .map_err(GraphonError::Network)?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -103,7 +103,7 @@ impl ClassifierAdapter {
             )));
         }
 
-        let chat_resp: ChatResponse = resp.json().await.map_err(|e| GraphonError::Network(e))?;
+        let chat_resp: ChatResponse = resp.json().await.map_err(GraphonError::Network)?;
 
         let content = chat_resp
             .choices
