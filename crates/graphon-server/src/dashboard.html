@@ -359,6 +359,22 @@
             font-weight: 500;
         }
 
+        .label-delete {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 0.9rem;
+            line-height: 1;
+            padding: 0 0 0 0.2rem;
+            opacity: 0.4;
+            transition: opacity 0.15s, color 0.15s;
+        }
+        .label-delete:hover {
+            opacity: 1;
+            color: var(--danger);
+        }
+
         .loading-dots:after {
             content: '.';
             animation: dots 1.5s steps(5, end) infinite;
@@ -620,13 +636,23 @@
                     container.innerHTML = '<p style="color: var(--text-secondary);">Aucune étiquette trouvée.</p>';
                     return;
                 }
+                const LABEL_NAMES = {
+                    system: 'system',
+                    graphon: 'Graphon',
+                    stars: 'stars',
+                    nested: 'hiérarchiques',
+                    promotional: 'promotional',
+                    empty_unused: 'empty',
+                    low_usage: 'peu utilisées',
+                    active: 'actives',
+                };
                 container.innerHTML = '';
                 categories.forEach(cat => {
                     const card = document.createElement('div');
                     card.className = 'category-card';
                     card.innerHTML = `
                         <div class="category-header">
-                            <span class="category-name">${cat.name}</span>
+                            <span class="category-name">${LABEL_NAMES[cat.name] || cat.name}</span>
                             <span class="category-action action-${cat.action}">${cat.action}</span>
                         </div>
                         <p style="color: var(--text-secondary); font-size: 0.85rem; margin-top: 0.25rem;">${cat.description}</p>
@@ -634,6 +660,7 @@
                             ${cat.labels.map(l => `
                                 <span class="label-pill">
                                     ${l.name} <span class="count">(${l.messages_total || 0})</span>
+                                    ${cat.action !== 'keep' ? `<button class="label-delete" onclick="deleteLabel('${l.name}', this)">&times;</button>` : ''}
                                 </span>
                             `).join('')}
                         </div>
@@ -642,6 +669,21 @@
                 });
             } catch (err) {
                 container.innerHTML = `<p style="color: var(--danger);">Erreur : ${err.message}</p>`;
+            }
+        }
+
+        // Delete a single label by name
+        async function deleteLabel(name, btn) {
+            const pill = btn.closest('.label-pill');
+            pill.style.opacity = '0.4';
+            try {
+                const response = await fetch(`/api/labels/${encodeURIComponent(name)}`, { method: 'DELETE' });
+                if (!response.ok) throw new Error('Échec de la suppression');
+                pill.remove();
+                showToast(`Étiquette "${name}" supprimée`, 'success');
+            } catch (err) {
+                pill.style.opacity = '1';
+                showToast(err.message, 'error');
             }
         }
 

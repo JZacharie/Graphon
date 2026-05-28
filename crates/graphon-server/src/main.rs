@@ -1,7 +1,7 @@
 use axum::{
     http::StatusCode,
     response::{Html, IntoResponse, Redirect},
-    routing::{get, post},
+    routing::{delete, get, post},
     Extension, Json, Router,
 };
 use clap::Parser;
@@ -95,6 +95,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let llm_key = std::env::var("LLM_API_KEY").ok();
     let google_client_id = std::env::var("GOOGLE_CLIENT_ID").ok();
     let google_client_secret = std::env::var("GOOGLE_CLIENT_SECRET").ok();
+    let pylos_base_url = std::env::var("PYLOS_BASE_URL")
+        .unwrap_or_else(|_| "http://localhost:3000".into());
+    let pylos_api_key = std::env::var("PYLOS_API_KEY").ok();
+    let pylos_model = std::env::var("PYLOS_MODEL")
+        .unwrap_or_else(|_| "deepseek-v4-flash".into());
     let qdrant_url = std::env::var("QDRANT_URL").ok();
     let qdrant_collection = std::env::var("QDRANT_COLLECTION").ok();
     let qdrant_vector_size = std::env::var("QDRANT_VECTOR_SIZE")
@@ -104,7 +109,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize adapters
     let gmail_client_adapter = Arc::new(GmailClient::new(gmail_token));
     let gmail_client = gmail_client_adapter.clone() as Arc<dyn GmailPort>;
-    let classifier = Arc::new(ClassifierAdapter::new(llm_key.clone()));
+    let classifier = Arc::new(ClassifierAdapter::new(
+        pylos_base_url,
+        pylos_api_key,
+        pylos_model,
+    ));
     let storage = Arc::new(DatabaseAdapter::new(database_url.as_deref()).await?);
     let qdrant_adapter = Arc::new(QdrantAdapter::new(
         qdrant_url,
@@ -163,6 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .route("/rag/reindex", post(rag_reindex_handler))
             .route("/rag/search", post(rag_search_handler))
             .route("/api/labels", get(api_labels_handler))
+            .route("/api/labels/:name", delete(api_labels_delete_handler))
             .route("/api/labels/cleanup", post(api_labels_cleanup_handler))
             .route(
                 "/api/labels/consolidate/:prefix/:target",
@@ -598,6 +608,25 @@ async fn api_labels_handler(
         }))),
         Err(err) => {
             error!("Label analysis error: {:?}", err);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "status": "error", "message": format!("{}", err) })),
+            ))
+        }
+    }
+}
+
+async fn api_labels_delete_handler(
+    axum::extract::Path(name): axum::extract::Path<String>,
+    Extension(state): Extension<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    match state.label_organizer.delete_label_by_name(&name).await {
+        Ok(label_name) => Ok(Json(serde_json::json!({
+            "status": "success",
+            "deleted": label_name
+        }))),
+        Err(err) => {
+            error!("Label deletion error: {:?}", err);
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({ "status": "error", "message": format!("{}", err) })),
