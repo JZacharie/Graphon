@@ -231,8 +231,14 @@ async fn metrics_handler(Extension(state): Extension<Arc<AppState>>) -> impl Int
          # HELP graphon_rag_search_errors_total Total number of failed RAG search requests\n\
          # TYPE graphon_rag_search_errors_total counter\n\
          graphon_rag_search_errors_total {}\n",
-        sync_total, sync_errors, rag_total, rag_errors,
-        reindex_total, reindex_errors, search_total, search_errors
+        sync_total,
+        sync_errors,
+        rag_total,
+        rag_errors,
+        reindex_total,
+        reindex_errors,
+        search_total,
+        search_errors
     );
 
     (

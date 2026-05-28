@@ -84,7 +84,10 @@ impl QdrantAdapter {
     }
 
     pub fn points_url(&self) -> String {
-        format!("{}/collections/{}/points", self.qdrant_url, self.collection_name)
+        format!(
+            "{}/collections/{}/points",
+            self.qdrant_url, self.collection_name
+        )
     }
 
     pub fn collection_name(&self) -> &str {
@@ -188,13 +191,15 @@ impl VectorStorePort for QdrantAdapter {
             }
         });
 
-        let response = self.client.put(&create_url).json(&create_body).send().await?;
+        let response = self
+            .client
+            .put(&create_url)
+            .json(&create_body)
+            .send()
+            .await?;
 
         if response.status().is_success() {
-            info!(
-                "Qdrant collection '{}' ready.",
-                self.collection_name
-            );
+            info!("Qdrant collection '{}' ready.", self.collection_name);
             Ok(())
         } else {
             let status = response.status();
@@ -214,18 +219,12 @@ impl VectorStorePort for QdrantAdapter {
     }
 
     async fn delete_collection(&self) -> Result<(), GraphonError> {
-        info!(
-            "Deleting Qdrant collection '{}'...",
-            self.collection_name
-        );
+        info!("Deleting Qdrant collection '{}'...", self.collection_name);
         let delete_url = self.collection_url();
         let response = self.client.delete(&delete_url).send().await?;
 
         if response.status().is_success() || response.status() == 404 {
-            info!(
-                "Qdrant collection '{}' deleted.",
-                self.collection_name
-            );
+            info!("Qdrant collection '{}' deleted.", self.collection_name);
             Ok(())
         } else {
             let body = response.text().await.unwrap_or_default();
@@ -302,10 +301,7 @@ impl VectorStorePort for QdrantAdapter {
         Ok(())
     }
 
-    async fn search(
-        &self,
-        query: &SearchQuery,
-    ) -> Result<Vec<SearchResult>, GraphonError> {
+    async fn search(&self, query: &SearchQuery) -> Result<Vec<SearchResult>, GraphonError> {
         info!(
             "Searching '{}' collection for: '{}'",
             self.collection_name, query.query_text
@@ -324,7 +320,12 @@ impl VectorStorePort for QdrantAdapter {
             }
         });
 
-        let response = self.client.post(&search_url).json(&search_body).send().await?;
+        let response = self
+            .client
+            .post(&search_url)
+            .json(&search_body)
+            .send()
+            .await?;
 
         if !response.status().is_success() {
             let err = response.text().await.unwrap_or_default();
