@@ -7,7 +7,7 @@ FROM --platform=$BUILDPLATFORM tonistiigi/xx AS xx
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 1 — Builder
 # ─────────────────────────────────────────────────────────────────────────────
-FROM --platform=$BUILDPLATFORM rust:1.85-bookworm AS builder
+FROM --platform=$BUILDPLATFORM rust:1.95-bookworm AS builder
 COPY --from=xx / /
 
 # Disable CPU Jitter entropy in aws-lc-sys to avoid cross-compilation errors
