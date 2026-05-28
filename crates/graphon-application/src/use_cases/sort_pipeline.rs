@@ -71,7 +71,8 @@ impl MailSortingPipeline {
                 self.storage.save_email(&email).await?;
                 debug!("Email ID {} saved to storage.", email.id);
                 Ok(())
-            }.await;
+            }
+            .await;
 
             if let Err(e) = process_result {
                 tracing::error!("Failed to process email ID {}: {:?}", email.id, e);
@@ -89,7 +90,11 @@ impl MailSortingPipeline {
             let target_emails = match self.gmail_client.fetch_emails_by_query(&rule.query).await {
                 Ok(emails) => emails,
                 Err(e) => {
-                    tracing::error!("Failed to fetch emails for retention rule query '{}': {:?}", rule.query, e);
+                    tracing::error!(
+                        "Failed to fetch emails for retention rule query '{}': {:?}",
+                        rule.query,
+                        e
+                    );
                     continue;
                 }
             };

@@ -294,16 +294,15 @@ async fn sync_handler(
                 info!("Background mail sync completed successfully.");
             }
             Ok(Err(err)) => {
-                metrics
-                    .sync_errors_total
-                    .fetch_add(1, Ordering::Relaxed);
+                metrics.sync_errors_total.fetch_add(1, Ordering::Relaxed);
                 error!("Background sync pipeline error: {:?}", err);
             }
             Err(_) => {
-                metrics
-                    .sync_errors_total
-                    .fetch_add(1, Ordering::Relaxed);
-                error!("Background sync pipeline timed out after {} seconds.", sync_timeout);
+                metrics.sync_errors_total.fetch_add(1, Ordering::Relaxed);
+                error!(
+                    "Background sync pipeline timed out after {} seconds.",
+                    sync_timeout
+                );
             }
         }
     });
