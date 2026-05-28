@@ -54,24 +54,27 @@ graph TD
 ### Rôle de chaque Crate (Backend Rust)
 
 1. **`graphon-core` (Domaine)** : Contient le modèle métier pur, indépendant de toute technologie ou I/O.
-   - **Entités** : `Email`, `Attachment`, `Label`, `RetentionRule`.
+   - **Entités** : `Email`, `Attachment`, `Label`, `RetentionRule`, `RagChunk`, `SearchResult`.
    - **Ports (Traits)** :
      - `GmailPort` : Récupération des messages, application/retrait de labels, suppression.
-     - `ClassifierPort` : Classification sémantique ou heuristique de l'importance et des catégories.
-     - `StoragePort` : Lecture/Écriture dans la base de données.
+     - `ClassifierPort` : Classification sémantique ou heuristique de l'importance et des catégories via LLM.
+     - `StoragePort` : Lecture/Écriture dans la base de données relationnelle.
+     - `VectorStorePort` : Indexation et recherche sémantique des chunks d'emails.
 
-2. **`graphon-infrastructure` (Adaptateurs)** : Implémente les ports définis par le noyau domaine.
-   - **Gmail Client Adapter** : Requêtes HTTP asynchrones vers l'API Google Gmail avec gestion OAuth2.
+2. **`graphon-infrastructure` (Adapters)** : Implémente les ports définis par le noyau domaine.
+   - **Gmail Client Adapter** : Requêtes HTTP asynchrones vers l'API Google Gmail avec gestion OAuth2 et gestion résiliente des erreurs de jeton.
    - **Database Adapter** : Persistance avec PostgreSQL et **SQLx** (`sqlx`).
-   - **AI Classifier Adapter** : Connexion aux modèles LLM ou règles locales pour classifier les e-mails.
+   - **Qdrant Adapter** : Connexion à la base de données vectorielle **Qdrant** pour stocker les embeddings et réaliser des recherches sémantiques RAG.
+   - **AI Classifier Adapter** : Connexion à l'API Pylos pour classifier la pertinence des e-mails.
 
 3. **`graphon-application` (Cas d'usage / Pipelines)** : Orchestre la logique applicative sous forme de pipelines de traitement asynchrones.
-   - **Mail Sorting Pipeline** : Ingestion -> Analyse & Nettoyage -> Classification -> Application des modifications Gmail.
-   - **RAG Ingestion Pipeline** : Extraction du contenu textuel -> Chunking -> Exportation des embeddings.
+   - **Mail Sorting Pipeline`** : Ingestion -> Analyse & Nettoyage -> Classification sémantique -> Application des modifications Gmail.
+   - **RAG Ingestion Pipeline (RagIndexer)** : Extraction du contenu textuel, découpage en chunks et enregistrement vectoriel dans Qdrant.
+   - **Label Organizer** : Organisation automatique des labels, détection des catégories obsolètes et nettoyage sécurisé (avec détection et protection intégrée des étiquettes système/étoiles comme `GREEN_CIRCLE` ou `RED_STAR` pour éviter les blocages de l'API Gmail).
 
 4. **`graphon-server` (Entrypoints)** :
-   - **CLI Mode** : Exécution de tâches planifiées via Cron ou CLI.
-   - **Server Mode (Axum)** : API HTTP pour déclencher des runs, exporter les données pour le RAG, consulter les métriques, ou recevoir des webhooks de notification push Gmail (Pub/Sub).
+   - **CLI Mode** : Exécution de tâches planifiées via Cron ou arguments CLI.
+   - **Server Mode (Axum)** : API HTTP exposant des endpoints de statistiques, de listing, de synchronisation et de gestion de labels, sécurisés avec un mécanisme de redirection OAuth2 intelligent (redirection via `window.top.location.href` pour supporter l'intégration dans des portails iframe sans blocage CORS/Google Auth).
 
 ---
 
