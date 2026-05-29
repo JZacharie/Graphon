@@ -301,4 +301,14 @@ impl StoragePort for DatabaseAdapter {
             }
         }
     }
+
+    async fn health_check(&self) -> Result<(), GraphonError> {
+        match &self.connection {
+            DatabaseConnection::Postgres(pool) => {
+                sqlx::query("SELECT 1").execute(pool).await?;
+                Ok(())
+            }
+            DatabaseConnection::Mock(_) => Ok(()),
+        }
+    }
 }

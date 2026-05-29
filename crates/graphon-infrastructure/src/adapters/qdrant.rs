@@ -2,12 +2,18 @@ use async_trait::async_trait;
 use graphon_core::entities::{RagChunk, SearchQuery, SearchResult};
 use graphon_core::error::GraphonError;
 use graphon_core::ports::VectorStorePort;
+use qdrant_client::qdrant::{
+    CreateCollectionBuilder, Distance, PointStruct, QueryPointsBuilder, UpsertPointsBuilder,
+    VectorParamsBuilder,
+};
+use qdrant_client::Qdrant;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tracing::info;
 
 pub struct QdrantAdapter {
+    qdrant_client: Qdrant,
     client: reqwest::Client,
-    qdrant_url: String,
     collection_name: String,
     vector_size: usize,
     llm_api_key: Option<String>,
@@ -64,21 +70,6 @@ struct PylosEmbeddingData {
     embedding: Vec<f32>,
 }
 
-#[derive(Deserialize)]
-struct QdrantSearchResponse {
-    result: Vec<QdrantScoredPoint>,
-}
-
-#[derive(Deserialize)]
-struct QdrantScoredPoint {
-    #[allow(dead_code)]
-    id: Option<serde_json::Value>,
-    #[allow(dead_code)]
-    version: Option<f64>,
-    score: Option<f64>,
-    payload: Option<serde_json::Value>,
-}
-
 impl QdrantAdapter {
     pub fn new(
         qdrant_url: Option<String>,
@@ -93,14 +84,20 @@ impl QdrantAdapter {
             qdrant_url.unwrap_or_else(|| "http://qdrant.qdrant.svc.cluster.local:6333".to_string());
         let collection_name = collection_name.unwrap_or_else(|| "emails".to_string());
         let vector_size = vector_size.unwrap_or(768);
+
+        let qdrant_client = Qdrant::from_url(&qdrant_url).build().unwrap_or_else(|e| {
+            panic!("Failed to initialize Qdrant client: {}", e);
+        });
+
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_default();
+
         Self {
+            qdrant_client,
             client,
-            qdrant_url,
             collection_name,
             vector_size,
             llm_api_key,
@@ -108,17 +105,6 @@ impl QdrantAdapter {
             pylos_api_key,
             pylos_embedding_model,
         }
-    }
-
-    pub fn collection_url(&self) -> String {
-        format!("{}/collections/{}", self.qdrant_url, self.collection_name)
-    }
-
-    pub fn points_url(&self) -> String {
-        format!(
-            "{}/collections/{}/points",
-            self.qdrant_url, self.collection_name
-        )
     }
 
     pub fn collection_name(&self) -> &str {
@@ -274,56 +260,52 @@ impl VectorStorePort for QdrantAdapter {
             "Creating/ensuring Qdrant collection '{}'...",
             self.collection_name
         );
-        let create_url = self.collection_url();
-        let create_body = serde_json::json!({
-            "vectors": {
-                "size": self.vector_size,
-                "distance": "Cosine"
-            }
-        });
 
-        let response = self
-            .client
-            .put(&create_url)
-            .json(&create_body)
-            .send()
-            .await?;
+        let exists = self
+            .qdrant_client
+            .collection_exists(&self.collection_name)
+            .await
+            .map_err(|e| GraphonError::Internal(e.to_string()))?;
 
-        if response.status().is_success() {
-            info!("Qdrant collection '{}' ready.", self.collection_name);
-            Ok(())
+        if !exists {
+            self.qdrant_client
+                .create_collection(
+                    CreateCollectionBuilder::new(&self.collection_name).vectors_config(
+                        VectorParamsBuilder::new(self.vector_size as u64, Distance::Cosine),
+                    ),
+                )
+                .await
+                .map_err(|e| GraphonError::Internal(e.to_string()))?;
+            info!(
+                "Qdrant collection '{}' created successfully.",
+                self.collection_name
+            );
         } else {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            if status == 409 || body.contains("already exists") {
-                info!(
-                    "Qdrant collection '{}' already exists.",
-                    self.collection_name
-                );
-                return Ok(());
-            }
-            Err(GraphonError::Internal(format!(
-                "Failed to create Qdrant collection '{}': {} {}",
-                self.collection_name, status, body
-            )))
+            info!(
+                "Qdrant collection '{}' already exists.",
+                self.collection_name
+            );
         }
+
+        Ok(())
     }
 
     async fn delete_collection(&self) -> Result<(), GraphonError> {
         info!("Deleting Qdrant collection '{}'...", self.collection_name);
-        let delete_url = self.collection_url();
-        let response = self.client.delete(&delete_url).send().await?;
+        let exists = self
+            .qdrant_client
+            .collection_exists(&self.collection_name)
+            .await
+            .map_err(|e| GraphonError::Internal(e.to_string()))?;
 
-        if response.status().is_success() || response.status() == 404 {
+        if exists {
+            self.qdrant_client
+                .delete_collection(&self.collection_name)
+                .await
+                .map_err(|e| GraphonError::Internal(e.to_string()))?;
             info!("Qdrant collection '{}' deleted.", self.collection_name);
-            Ok(())
-        } else {
-            let body = response.text().await.unwrap_or_default();
-            Err(GraphonError::Internal(format!(
-                "Failed to delete Qdrant collection '{}': {}",
-                self.collection_name, body
-            )))
         }
+        Ok(())
     }
 
     async fn index_chunks(&self, chunks: &[RagChunk]) -> Result<(), GraphonError> {
@@ -351,38 +333,22 @@ impl VectorStorePort for QdrantAdapter {
         let mut points = Vec::new();
         for (i, chunk) in chunks.iter().enumerate() {
             let point_id = fnv1a_64(&format!("{}-{}", chunk.email_id, chunk.chunk_index));
-            let vector = &embeddings[i];
+            let vector = embeddings[i].clone();
 
-            points.push(serde_json::json!({
-                "id": point_id,
-                "vector": vector,
-                "payload": {
-                    "email_id": chunk.email_id,
-                    "subject": chunk.subject,
-                    "sender": chunk.sender,
-                    "chunk_index": chunk.chunk_index,
-                    "content": chunk.content
-                }
-            }));
+            let mut payload: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
+            payload.insert("email_id".to_string(), chunk.email_id.clone().into());
+            payload.insert("subject".to_string(), chunk.subject.clone().into());
+            payload.insert("sender".to_string(), chunk.sender.clone().into());
+            payload.insert("chunk_index".to_string(), (chunk.chunk_index as i64).into());
+            payload.insert("content".to_string(), chunk.content.clone().into());
+
+            points.push(PointStruct::new(point_id, vector, payload));
         }
 
-        let points_url = format!("{}?wait=true", self.points_url());
-        let points_body = serde_json::json!({ "points": points });
-
-        let response = self
-            .client
-            .put(&points_url)
-            .json(&points_body)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            let err = response.text().await.unwrap_or_default();
-            return Err(GraphonError::Internal(format!(
-                "Qdrant push points error: {}",
-                err
-            )));
-        }
+        self.qdrant_client
+            .upsert_points(UpsertPointsBuilder::new(&self.collection_name, points))
+            .await
+            .map_err(|e| GraphonError::Internal(e.to_string()))?;
 
         info!(
             "Successfully indexed {} chunks into '{}'.",
@@ -400,58 +366,72 @@ impl VectorStorePort for QdrantAdapter {
 
         let query_vector = self.get_single_embedding(&query.query_text).await?;
 
-        let search_url = format!("{}/points/search", self.collection_url());
-        let search_body = serde_json::json!({
-            "vector": query_vector,
-            "limit": query.limit,
-            "with_payload": true,
-            "params": {
-                "hnsw_ef": 128,
-                "exact": false
-            }
-        });
+        let request = QueryPointsBuilder::new(&self.collection_name)
+            .query(query_vector)
+            .limit(query.limit)
+            .with_payload(true)
+            .build();
 
-        let response = self
-            .client
-            .post(&search_url)
-            .json(&search_body)
-            .send()
-            .await?;
+        let search_result = self
+            .qdrant_client
+            .query(request)
+            .await
+            .map_err(|e| GraphonError::Internal(e.to_string()))?;
 
-        if !response.status().is_success() {
-            let err = response.text().await.unwrap_or_default();
-            return Err(GraphonError::Internal(format!(
-                "Qdrant search error: {}",
-                err
-            )));
+        let mut results = Vec::new();
+        for point in search_result.result {
+            let payload = point.payload;
+            let score = point.score;
+
+            let email_id = payload
+                .get("email_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+
+            let subject = payload
+                .get("subject")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+
+            let sender = payload
+                .get("sender")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+
+            let chunk_index = payload
+                .get("chunk_index")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(0) as usize;
+
+            let content = payload
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+
+            results.push(SearchResult {
+                email_id,
+                subject,
+                sender,
+                chunk_index,
+                content,
+                score: score as f64,
+            });
         }
-
-        let res: QdrantSearchResponse = response.json().await?;
-
-        let results: Vec<SearchResult> = res
-            .result
-            .into_iter()
-            .filter_map(|sp| {
-                let payload = sp.payload?;
-                let score = sp.score?;
-                let email_id = payload.get("email_id")?.as_str()?.to_string();
-                let subject = payload.get("subject")?.as_str()?.to_string();
-                let sender = payload.get("sender")?.as_str()?.to_string();
-                let chunk_index = payload.get("chunk_index")?.as_u64()? as usize;
-                let content = payload.get("content")?.as_str()?.to_string();
-                Some(SearchResult {
-                    email_id,
-                    subject,
-                    sender,
-                    chunk_index,
-                    content,
-                    score,
-                })
-            })
-            .collect();
 
         info!("Found {} results from Qdrant search.", results.len());
         Ok(results)
+    }
+
+    async fn health_check(&self) -> Result<(), GraphonError> {
+        self.qdrant_client
+            .health_check()
+            .await
+            .map_err(|e| GraphonError::Internal(e.to_string()))?;
+        Ok(())
     }
 }
 

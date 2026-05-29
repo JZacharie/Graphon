@@ -68,6 +68,7 @@ struct AppState {
     gmail_client_adapter: Arc<GmailClient>,
     classifier: Arc<dyn ClassifierPort>,
     storage: Arc<dyn StoragePort>,
+    vector_store: Arc<dyn VectorStorePort>,
     rag_indexer: Arc<RagIndexer>,
     label_organizer: Arc<LabelOrganizer>,
     metrics: Arc<ServerMetrics>,
@@ -125,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         pylos_embedding_model,
     ));
     let vector_store = qdrant_adapter.clone() as Arc<dyn VectorStorePort>;
-    let rag_indexer = Arc::new(RagIndexer::new(storage.clone(), vector_store));
+    let rag_indexer = Arc::new(RagIndexer::new(storage.clone(), vector_store.clone()));
 
     // Ensure Qdrant collection exists at startup
     info!(
@@ -143,6 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         gmail_client_adapter,
         classifier: classifier.clone(),
         storage: storage.clone(),
+        vector_store,
         rag_indexer,
         label_organizer,
         metrics,
@@ -201,8 +203,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn health_handler() -> (StatusCode, &'static str) {
-    (StatusCode::OK, "OK")
+async fn health_handler(Extension(state): Extension<Arc<AppState>>) -> impl IntoResponse {
+    let db_status = match state.storage.health_check().await {
+        Ok(_) => "up",
+        Err(e) => {
+            error!("Database health check failed: {:?}", e);
+            "down"
+        }
+    };
+
+    let qdrant_status = match state.vector_store.health_check().await {
+        Ok(_) => "up",
+        Err(e) => {
+            error!("Qdrant health check failed: {:?}", e);
+            "down"
+        }
+    };
+
+    let status = if db_status == "up" && qdrant_status == "up" {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        status,
+        Json(serde_json::json!({
+            "status": if status == StatusCode::OK { "ok" } else { "error" },
+            "service": "graphon",
+            "dependencies": {
+                "database": db_status,
+                "qdrant": qdrant_status,
+            }
+        })),
+    )
 }
 
 async fn metrics_handler(Extension(state): Extension<Arc<AppState>>) -> impl IntoResponse {

@@ -28,6 +28,7 @@ pub trait StoragePort: Send + Sync {
     async fn get_emails_count(&self) -> Result<i64, GraphonError>;
     async fn save_retention_rule(&self, rule: &RetentionRule) -> Result<(), GraphonError>;
     async fn get_retention_rules(&self) -> Result<Vec<RetentionRule>, GraphonError>;
+    async fn health_check(&self) -> Result<(), GraphonError>;
 }
 
 #[async_trait]
@@ -39,4 +40,5 @@ pub trait VectorStorePort: Send + Sync {
     ) -> Result<Vec<crate::entities::SearchResult>, GraphonError>;
     async fn create_collection(&self) -> Result<(), GraphonError>;
     async fn delete_collection(&self) -> Result<(), GraphonError>;
+    async fn health_check(&self) -> Result<(), GraphonError>;
 }

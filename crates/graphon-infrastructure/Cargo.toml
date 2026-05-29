@@ -14,3 +14,4 @@ sqlx.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
+qdrant-client.workspace = true
