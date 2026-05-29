@@ -127,7 +127,10 @@ impl QdrantAdapter {
 
     async fn get_embeddings(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, GraphonError> {
         if let Some(ref model) = self.pylos_embedding_model {
-            let base_url = self.pylos_base_url.as_deref().unwrap_or("http://localhost:3000");
+            let base_url = self
+                .pylos_base_url
+                .as_deref()
+                .unwrap_or("http://localhost:3000");
             let url = format!("{}/v1/embeddings", base_url.trim_end_matches('/'));
             let body = PylosEmbedRequest {
                 model: model.clone(),
@@ -152,11 +155,10 @@ impl QdrantAdapter {
         } else {
             let api_key = match &self.llm_api_key {
                 Some(key) => key,
-                None => {
-                    return Err(GraphonError::Classifier(
-                        "LLM_API_KEY/PYLOS_EMBEDDING_MODEL not configured. Cannot generate embeddings.".to_string(),
-                    ))
-                }
+                None => return Err(GraphonError::Classifier(
+                    "LLM_API_KEY/PYLOS_EMBEDDING_MODEL not configured. Cannot generate embeddings."
+                        .to_string(),
+                )),
             };
 
             let url = format!(
@@ -192,7 +194,10 @@ impl QdrantAdapter {
 
     async fn get_single_embedding(&self, text: &str) -> Result<Vec<f32>, GraphonError> {
         if let Some(ref model) = self.pylos_embedding_model {
-            let base_url = self.pylos_base_url.as_deref().unwrap_or("http://localhost:3000");
+            let base_url = self
+                .pylos_base_url
+                .as_deref()
+                .unwrap_or("http://localhost:3000");
             let url = format!("{}/v1/embeddings", base_url.trim_end_matches('/'));
             let body = PylosEmbedRequest {
                 model: model.clone(),
@@ -211,18 +216,22 @@ impl QdrantAdapter {
                 )));
             }
             let res: PylosEmbedResponse = response.json().await?;
-            let embedding = res.data.into_iter().next().map(|d| d.embedding).ok_or_else(|| {
-                GraphonError::Classifier("Pylos embedding returned empty results".to_string())
-            })?;
+            let embedding = res
+                .data
+                .into_iter()
+                .next()
+                .map(|d| d.embedding)
+                .ok_or_else(|| {
+                    GraphonError::Classifier("Pylos embedding returned empty results".to_string())
+                })?;
             Ok(embedding)
         } else {
             let api_key = match &self.llm_api_key {
                 Some(key) => key,
-                None => {
-                    return Err(GraphonError::Classifier(
-                        "LLM_API_KEY/PYLOS_EMBEDDING_MODEL not configured. Cannot generate embeddings.".to_string(),
-                    ))
-                }
+                None => return Err(GraphonError::Classifier(
+                    "LLM_API_KEY/PYLOS_EMBEDDING_MODEL not configured. Cannot generate embeddings."
+                        .to_string(),
+                )),
             };
 
             let url = format!(

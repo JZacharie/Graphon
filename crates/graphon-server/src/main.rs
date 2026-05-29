@@ -738,12 +738,16 @@ async fn chat_completions_handler(
         outbound_messages.push(msg.clone());
     }
 
-    let pylos_base_url = std::env::var("PYLOS_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".into());
+    let pylos_base_url =
+        std::env::var("PYLOS_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".into());
     let pylos_api_key = std::env::var("PYLOS_API_KEY").ok();
     let pylos_model = std::env::var("PYLOS_MODEL").unwrap_or_else(|_| "deepseek-v4-flash".into());
 
     let client = reqwest::Client::new();
-    let url = format!("{}/v1/chat/completions", pylos_base_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/v1/chat/completions",
+        pylos_base_url.trim_end_matches('/')
+    );
 
     let pylos_payload = serde_json::json!({
         "model": pylos_model,
@@ -767,10 +771,15 @@ async fn chat_completions_handler(
     if !response.status().is_success() {
         let status = response.status();
         let err_text = response.text().await.unwrap_or_default();
-        error!("Pylos returned error status: {}, body: {}", status, err_text);
+        error!(
+            "Pylos returned error status: {}, body: {}",
+            status, err_text
+        );
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "status": "error", "message": format!("Pylos returned error: {}", err_text) })),
+            Json(
+                serde_json::json!({ "status": "error", "message": format!("Pylos returned error: {}", err_text) }),
+            ),
         ));
     }
 
