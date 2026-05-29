@@ -167,6 +167,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Build router
         let app = Router::new()
             .route("/", get(dashboard_handler))
+            .route("/reauth", get(reauth_handler))
             .route("/sso/complete/google-oauth2/", get(oauth_callback_handler))
             .route("/api/stats", get(api_stats_handler))
             .route("/api/emails", get(api_emails_handler))
@@ -596,6 +597,36 @@ async fn oauth_callback_handler(
     }
 
     Redirect::temporary("/").into_response()
+}
+
+async fn reauth_handler(Extension(state): Extension<Arc<AppState>>) -> impl IntoResponse {
+    info!("Clearing Gmail token for relogon...");
+    state.gmail_client_adapter.set_token(String::new());
+
+    // Update Vault with empty token to persist relogon state
+    if let Ok(vault_token) = std::env::var("VAULT_TOKEN") {
+        if let Some(ref client_id) = state.google_client_id {
+            if let Some(ref client_secret) = state.google_client_secret {
+                let client = reqwest::Client::new();
+                let payload = serde_json::json!({
+                    "data": {
+                        "gmail_token": "",
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                        "project_id": "graphon-497704"
+                    }
+                });
+                let _ = client
+                    .post("https://vault.p.zacharie.org/v1/secret/data/ai/graphon")
+                    .header("X-Vault-Token", &vault_token)
+                    .json(&payload)
+                    .send()
+                    .await;
+            }
+        }
+    }
+
+    Redirect::temporary("/")
 }
 
 async fn api_stats_handler(Extension(state): Extension<Arc<AppState>>) -> impl IntoResponse {

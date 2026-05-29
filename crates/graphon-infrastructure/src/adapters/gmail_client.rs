@@ -114,6 +114,18 @@ impl GmailClient {
         self.token.read().ok().and_then(|g| g.clone())
     }
 
+    fn check_auth_failure(&self, status: reqwest::StatusCode) {
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            warn!(
+                "Gmail authentication lost (status: {}). Clearing token.",
+                status
+            );
+            if let Ok(mut guard) = self.token.write() {
+                *guard = None;
+            }
+        }
+    }
+
     async fn fetch_message_ids(&self, query: &str) -> Result<Vec<MessageRef>, GraphonError> {
         let token = {
             let token_guard = self.token.read().unwrap();
@@ -131,6 +143,7 @@ impl GmailClient {
         let response = self.client.get(&url).bearer_auth(token).send().await?;
 
         if !response.status().is_success() {
+            self.check_auth_failure(response.status());
             let err_body = response.text().await.unwrap_or_default();
             return Err(GraphonError::Gmail(format!(
                 "Failed to list messages: {}",
@@ -154,6 +167,7 @@ impl GmailClient {
         let response = self.client.get(&url).bearer_auth(token).send().await?;
 
         if !response.status().is_success() {
+            self.check_auth_failure(response.status());
             let err_body = response.text().await.unwrap_or_default();
             return Err(GraphonError::Gmail(format!(
                 "Failed to get message {}: {}",
